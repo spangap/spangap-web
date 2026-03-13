@@ -5,10 +5,10 @@ Browser-accessible MJPEG video + WebSocket audio. Include `web.h`.
 ## Usage
 
 ```cpp
-webCreate();  // creates task on core 1, starts HTTP server on port 80
+webInit();  // creates task on core 1, opens HTTP port from NVS web_port (default 80)
 ```
 
-Open `http://<ip>/` in a browser. Click anywhere to enable audio (browser autoplay policy).
+Open `http://seccam.local/` in a browser (or by IP). Click anywhere to enable audio (browser autoplay policy).
 
 ## Endpoints
 
@@ -25,12 +25,12 @@ Static files are stored on the SPIFFS partition (1.5MB at 0x670000 in default_8M
 
 ### Building and flashing
 
-```bash
-./build_spiffs.sh    # gzips seccam/spiffs/* → build_spiffs/spiffs.bin
-./flash_spiffs.sh    # writes spiffs.bin to flash at 0x670000
-```
+SPIFFS image is built automatically as part of the normal build. Source files go in `data/`.
 
-Source files go in `seccam/spiffs/`. Currently just `index.html`.
+```bash
+idf.py build                              # builds spiffs.bin from data/
+idf.py -p /dev/tty.usbmodem2101 flash    # flashes everything including spiffs
+```
 
 ## Video (MJPEG)
 
