@@ -60,7 +60,7 @@ Single task manages two client slots:
 
 Both use the same task's camera and audio subscriber slots. The task subscribes when a client connects and unsubscribes when both clients are gone.
 
-Task loop: 1ms IPC timeout, dispatch camera/audio messages, poll for new connections and send data to active clients.
+Task loop: when idle (no clients streaming), `ipcReceive` with 200ms timeout to poll for connections. When streaming, blocks with `portMAX_DELAY` — woken by `MSG_CAM_FRAME`/`MSG_AUDIO_CHUNK`. Reacts to `MSG_NVS_CHANGED`/`MSG_NET_UP` for port updates and `MSG_WIFI_DOWN` to close server socket.
 
 ## Simultaneous use
 
