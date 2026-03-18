@@ -1,25 +1,27 @@
 # Web Server
 
-HTTP server for static file serving from SPIFFS. Include `web.h`.
+HTTP/HTTPS server for static files, WebSocket config sync, and RTSP stream proxy. Include `web.h`.
 
 ## Usage
 
 ```cpp
-webInit();  // creates task on core 1, opens HTTP port from NVS web_port (default 80)
+webInit();  // creates task on core 1, opens http_port (80) + https_port (443)
 ```
 
-Open `http://seccam.local/` in a browser (or by IP).
+Open `https://seccam.local/` in a browser (or `http://` by IP).
 
 ## Endpoints
 
 | Path | Method | Description |
 |------|--------|-------------|
-| `/` | GET | Serves `index.html` from SPIFFS (gzipped) |
-| `/<file>` | GET | Serve any file from SPIFFS (tries `<file>.gz` first) |
+| `/` | GET | Serves `index.html` from LittleFS (gzipped) |
+| `/<file>` | GET | Serve any file from LittleFS (tries `<file>.gz` first) |
+| `/` | WS | Config sync WebSocket (Pinia store ↔ cfg store) |
+| `/stream` | WS | RTSP stream proxy — web handles TLS + WS framing, proxies raw bytes to rtsp task via stream buffers |
 
-## SPIFFS
+## LittleFS
 
-Static files are stored on the SPIFFS partition (1.5MB at 0x670000 in default_8MB partition table). Files are gzipped at build time and served with `Content-Encoding: gzip`.
+Static files are stored on the LittleFS partition (1.5MB at 0x670000 in default_8MB partition table). Files are gzipped at build time and served with `Content-Encoding: gzip`.
 
 ### Building and flashing
 
