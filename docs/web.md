@@ -17,7 +17,7 @@ Open `https://seccam.local/` in a browser (or `http://` by IP).
 | `/` | GET | Serves `index.html` from LittleFS (gzipped) |
 | `/<file>` | GET | Serve any file from LittleFS (tries `<file>.gz` first) |
 | `/` | WS | Config sync WebSocket (Pinia store ↔ cfg store) |
-| `/stream` | WS | RTSP stream proxy — web handles TLS + WS framing, proxies raw bytes to rtsp task via stream buffers |
+| `/rtsp` | WS | RTSP stream proxy — web handles TLS + WS framing, proxies raw bytes to rtsp task via stream buffers |
 
 ## LittleFS
 
@@ -34,4 +34,8 @@ idf.py -p /dev/tty.usbmodem2101 flash    # flashes everything including spiffs
 
 ## Architecture
 
-Single task on core 1 (stack 4096, queue depth 4). Polls for incoming HTTP connections with `select()`. Reacts to `MSG_NVS_CHANGED`/`MSG_NETWORK_IS_UP` for port updates and `MSG_NETWORK_DOWN` to close server socket. Blocks indefinitely on IPC queue when server socket is closed.
+Single task on core 1 (stack 4096, queue depth 4). Polls for incoming HTTP connections with `select()`. Reacts to `MSG_CFG_CHANGED`/`MSG_NETWORK_IS_UP` for port updates and `MSG_NETWORK_DOWN` to close server socket. Blocks indefinitely on IPC queue when server socket is closed.
+
+### webRegister API
+
+Endpoints (RTSP, log, CLI) register via `webRegister()`, which supports both a WS path and a TCP port per endpoint. The web task manages all registered TCP listen sockets alongside its own HTTP/HTTPS ports, and dispatches incoming WS connections on matching paths. This centralizes port management and TLS handling in the web task.
