@@ -101,7 +101,7 @@ export const useDeviceStore = defineStore('device', () => {
     stopHeartbeat()
     heartbeatTimer = setInterval(() => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return
-      if (Date.now() - lastRx > 10000) {
+      if (Date.now() - lastRx > 5000) {
         console.log('[device] heartbeat timeout, reconnecting')
         // Don't wait for ws.close() TCP timeout — detach and reconnect now
         ws.onclose = null
