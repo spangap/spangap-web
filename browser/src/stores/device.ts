@@ -45,17 +45,15 @@ export const useDeviceStore = defineStore('device', () => {
       if (typeof ev.data !== 'string') return
       lastRx = Date.now()
       if (ev.data === 'pong') return
-      // Parse lines: "T:key=value" (initial dump) or "T:key=value" (update)
       const lines = ev.data.split('\n')
       for (const line of lines) {
         if (line.length < 4) continue
-        const type = line[0]  // 'I' or 'S'
+        const type = line[0]
         if (line[1] !== ':') continue
         const eq = line.indexOf('=', 2)
         if (eq < 0) continue
         const key = line.substring(2, eq)
         const val = line.substring(eq + 1)
-        if (settings[key] !== val) console.log(`[device] ${key}: ${settings[key]} → ${val}`)
         settings[key] = val
         types[key] = type
 
@@ -68,7 +66,6 @@ export const useDeviceStore = defineStore('device', () => {
             knownBuildTime = val
             reloading = true
             if (ws) { ws.close(); ws = null }
-            // Probe flushes stale keep-alive connections (gets RST), then navigate fresh
             fetch('/', { cache: 'no-store' }).catch(() => {}).finally(() => {
               setTimeout(() => { window.location.href = window.location.pathname + window.location.search }, 500)
             })
@@ -84,9 +81,7 @@ export const useDeviceStore = defineStore('device', () => {
       scheduleReconnect()
     }
 
-    ws.onerror = () => {
-      // onclose will fire after this
-    }
+    ws.onerror = () => {}
   }
 
   function scheduleReconnect() {
@@ -104,7 +99,6 @@ export const useDeviceStore = defineStore('device', () => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return
       if (Date.now() - lastRx > 5000) {
         console.log('[device] heartbeat timeout, reconnecting')
-        // Don't wait for ws.close() TCP timeout — detach and reconnect now
         ws.onclose = null
         ws.onerror = null
         try { ws.close() } catch {}
@@ -145,7 +139,6 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
-  // Auto-connect on store creation
   connect()
 
   return { settings, types, connected, set, save, saveWith, connect }
