@@ -55,6 +55,7 @@ export const useDeviceStore = defineStore('device', () => {
         if (eq < 0) continue
         const key = line.substring(2, eq)
         const val = line.substring(eq + 1)
+        if (settings[key] !== val) console.log(`[device] ${key}: ${settings[key]} → ${val}`)
         settings[key] = val
         types[key] = type
 
