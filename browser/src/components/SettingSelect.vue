@@ -24,7 +24,7 @@ const props = defineProps<{
 }>()
 const device = useDeviceStore()
 
-const currentVal = computed(() => device.settings[props.k] ?? '')
+const currentVal = computed(() => String(device.get(props.k) ?? ''))
 
 function onChange(val: string) {
   device.set(props.k, val)

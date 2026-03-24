@@ -3,7 +3,7 @@
     <div class="col-4 text-caption">{{ label }}</div>
     <q-input
       class="col"
-      :model-value="device.settings[k] ?? ''"
+      :model-value="String(device.get(k) ?? '')"
       dense outlined
       debounce="500"
       @update:model-value="onChange"

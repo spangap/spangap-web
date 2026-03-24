@@ -16,7 +16,7 @@ import { useDeviceStore } from '../stores/device'
 const props = defineProps<{ label: string; k: string }>()
 const device = useDeviceStore()
 
-const boolVal = computed(() => device.settings[props.k] === '1')
+const boolVal = computed(() => device.get(props.k) == 1)
 
 function onToggle(val: boolean) {
   device.set(props.k, val ? 1 : 0)

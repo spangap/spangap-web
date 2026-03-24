@@ -2,8 +2,7 @@ import { defineStore } from 'pinia'
 import { reactive, ref } from 'vue'
 
 export const useDeviceStore = defineStore('device', () => {
-  const settings = reactive<Record<string, string>>({})
-  const types = reactive<Record<string, string>>({})  // 'I' or 'S' per key
+  const settings: Record<string, any> = reactive({})
   const connected = ref(false)
 
   let ws: WebSocket | null = null
@@ -14,6 +13,44 @@ export const useDeviceStore = defineStore('device', () => {
   let lastRx = 0
   let reloading = false
 
+  /** Deep-merge src into dst (Vue 3 Proxy handles new property reactivity). */
+  function deepMerge(dst: any, src: any) {
+    for (const key of Object.keys(src)) {
+      const val = src[key]
+      if (val && typeof val === 'object' && !Array.isArray(val)) {
+        if (!dst[key] || typeof dst[key] !== 'object') dst[key] = {}
+        deepMerge(dst[key], val)
+      } else {
+        dst[key] = val
+      }
+    }
+  }
+
+  /** Read a value by dot-notation path (e.g., "s.cam.img.quality"). */
+  function get(path: string): any {
+    const parts = path.split('.')
+    let obj: any = settings
+    for (const p of parts) {
+      if (obj == null) return undefined
+      obj = obj[p]
+    }
+    return obj
+  }
+
+  /** Build nested object from a dot-notation path and value.
+   *  e.g., ("s.cam.img.quality", 15) → {s:{cam:{img:{quality:15}}}} */
+  function buildNested(path: string, val: any): any {
+    const parts = path.split('.')
+    const root: any = {}
+    let current = root
+    for (let i = 0; i < parts.length - 1; i++) {
+      current[parts[i]] = {}
+      current = current[parts[i]]
+    }
+    current[parts[parts.length - 1]] = val
+    return root
+  }
+
   function wsUrl() {
     const loc = window.location
     const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -21,6 +58,23 @@ export const useDeviceStore = defineStore('device', () => {
     const host = params.get('host') || loc.hostname
     const port = params.get('port') || loc.port || (loc.protocol === 'https:' ? '443' : '80')
     return `${proto}//${host}:${port}`
+  }
+
+  function checkBuildTime() {
+    const bt = settings.sys?.build_time
+    if (!bt) return
+    if (!knownBuildTime) {
+      knownBuildTime = bt
+      console.log('[device] build:', bt)
+    } else if (bt !== knownBuildTime) {
+      console.log('[device] build changed:', knownBuildTime, '→', bt, '— reloading')
+      knownBuildTime = bt
+      reloading = true
+      if (ws) { ws.close(); ws = null }
+      fetch('/', { cache: 'no-store' }).catch(() => {}).finally(() => {
+        setTimeout(() => { window.location.href = window.location.pathname + window.location.search }, 500)
+      })
+    }
   }
 
   function connect() {
@@ -44,33 +98,13 @@ export const useDeviceStore = defineStore('device', () => {
     ws.onmessage = (ev) => {
       if (typeof ev.data !== 'string') return
       lastRx = Date.now()
-      if (ev.data === 'pong') return
-      const lines = ev.data.split('\n')
-      for (const line of lines) {
-        if (line.length < 4) continue
-        const type = line[0]
-        if (line[1] !== ':') continue
-        const eq = line.indexOf('=', 2)
-        if (eq < 0) continue
-        const key = line.substring(2, eq)
-        const val = line.substring(eq + 1)
-        settings[key] = val
-        types[key] = type
-
-        if (key === 'build_time') {
-          if (!knownBuildTime) {
-            knownBuildTime = val
-            console.log('[device] build:', val)
-          } else if (val !== knownBuildTime) {
-            console.log('[device] build changed:', knownBuildTime, '→', val, '— reloading')
-            knownBuildTime = val
-            reloading = true
-            if (ws) { ws.close(); ws = null }
-            fetch('/', { cache: 'no-store' }).catch(() => {}).finally(() => {
-              setTimeout(() => { window.location.href = window.location.pathname + window.location.search }, 500)
-            })
-          }
-        }
+      try {
+        const json = JSON.parse(ev.data)
+        if (json.pong) return
+        deepMerge(settings, json)
+        checkBuildTime()
+      } catch {
+        /* ignore non-JSON */
       }
     }
 
@@ -109,7 +143,7 @@ export const useDeviceStore = defineStore('device', () => {
         scheduleReconnect()
         return
       }
-      ws.send('ping')
+      ws.send('{"ping":1}')
     }, 5000)
   }
 
@@ -117,29 +151,31 @@ export const useDeviceStore = defineStore('device', () => {
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null }
   }
 
-  function set(key: string, val: string | number) {
-    const v = String(val)
-    settings[key] = v
+  /** Set a config value by dot-notation path. Sends nested JSON to device. */
+  function set(path: string, val: string | number) {
+    /* Update local nested object */
+    const parts = path.split('.')
+    let obj: any = settings
+    for (let i = 0; i < parts.length - 1; i++) {
+      if (!obj[parts[i]] || typeof obj[parts[i]] !== 'object') obj[parts[i]] = {}
+      obj = obj[parts[i]]
+    }
+    obj[parts[parts.length - 1]] = val
+
+    /* Send nested JSON to device */
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(`${key}=${v}`)
+      ws.send(JSON.stringify(buildNested(path, val)))
     }
   }
 
-  function save(key: string) {
+  /** Force immediate settings write on device. */
+  function save() {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(`save ${key}`)
-    }
-  }
-
-  function saveWith(key: string, val: string | number) {
-    const v = String(val)
-    settings[key] = v
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(`save ${key}=${v}`)
+      ws.send('{"save":1}')
     }
   }
 
   connect()
 
-  return { settings, types, connected, set, save, saveWith, connect }
+  return { settings, connected, get, set, save, connect }
 })

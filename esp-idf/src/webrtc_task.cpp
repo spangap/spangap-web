@@ -8,7 +8,7 @@
  */
 #include "webrtc_task.h"
 #include "webrtc_sctp.h"
-#include "cfg.h"
+#include "storage.h"
 #include "compat.h"
 #include "ipc.h"
 #include "pm.h"
@@ -69,8 +69,9 @@ static char icePwd[28];
 static mbedtls_ssl_context dtls;
 static mbedtls_ssl_config dtlsConf;
 static mbedtls_ssl_cookie_ctx cookieCtx;
-static bool dtlsReady = false;
-static bool dtlsConnected = false;
+static bool dtlsReady = false;       /* one-time config initialized */
+static bool dtlsSessionActive = false; /* per-session ssl context initialized */
+static bool dtlsConnected = false;   /* handshake complete */
 
 /* DTLS timer state (custom, since MBEDTLS_TIMING_C is disabled on ESP-IDF) */
 static uint32_t timerStart;
@@ -291,10 +292,12 @@ static void dtlsSessionInit() {
     mbedtls_ssl_set_bio(&dtls, nullptr, webrtcBioSend, webrtcBioRecv, nullptr);
     mbedtls_ssl_set_timer_cb(&dtls, nullptr, dcTimerSet, webrtcTimerGet);
     mbedtls_ssl_set_export_keys_cb(&dtls, dtlsExportKeys, nullptr);
+    dtlsSessionActive = true;
 }
 
 static void dtlsSessionFree() {
     mbedtls_ssl_free(&dtls);
+    dtlsSessionActive = false;
     dtlsConnected = false;
 }
 
@@ -319,7 +322,7 @@ static std::string generateSdpAnswer(const char* offerSdp) {
     /* Parse peer's ice-ufrag and ice-pwd from offer (for ICE, though we don't use them) */
     /* We only need our own credentials and cert fingerprint */
 
-    int port = cfgGetInt("webrtc_port", 0);
+    int port = storageGetInt("s.net.webrtc_port", 0);
 
     char fingerprint[128] = {};
     tlsCertFingerprint(fingerprint, sizeof(fingerprint));
@@ -350,8 +353,8 @@ static std::string generateSdpAnswer(const char* offerSdp) {
     }
     /* WireGuard (check wg_address config) */
     { char wgAddr[16] = {};
-      cfgGetStr("wg_address", wgAddr, sizeof(wgAddr));
-      if (wgAddr[0] && cfgGetInt("wg_up", 0)) {
+      storageGetStr("s.wg.address", wgAddr, sizeof(wgAddr));
+      if (wgAddr[0] && storageGetInt("wg.up", 0)) {
           strncpy(ips[numIps], wgAddr, sizeof(ips[0]) - 1);
           numIps++;
       }
@@ -510,26 +513,26 @@ static void startStreaming() {
     /* Configure audio: HPF + gain from streaming config */
     if (audSubscribed) {
         audioSetHpf(true);
-        int gain = cfgGetInt("str_gain", 1);
+        int gain = storageGetInt("s.stream.gain", 1);
         if (gain > 0) audioSetGain(gain);
-        int agcMax = cfgGetInt("str_agc_max", 0);
+        int agcMax = storageGetInt("s.stream.agc_max", 0);
         if (agcMax > 0) {
-            audioSetAgc(cfgGetInt("str_agc_target", 8000),
-                        cfgGetInt("str_agc_attack", 10),
-                        cfgGetInt("str_agc_release", 500), agcMax);
+            audioSetAgc(storageGetInt("s.stream.agc_target", 8000),
+                        storageGetInt("s.stream.agc_attack", 10),
+                        storageGetInt("s.stream.agc_release", 500), agcMax);
         }
         audioSetCodec(AUDIO_PCM16);
         audioGo(false);
     }
 
-    int fps = cfgGetInt("str_fps", 20);
+    int fps = storageGetInt("s.stream.fps", 20);
     videoSetFps(fps);
     cameraGo(false);
 
     pmLockAcquire(webrtcLockLS);
     pmLockAcquire(webrtcLockCPU);
     streaming = true;
-    cfgSetQuiet("webrtc_up", "1");
+    storageSetQuiet("webrtc.up", "1");
     info("WebRTC: streaming started\n");
 }
 
@@ -540,14 +543,14 @@ static void stopStreaming() {
     pmLockRelease(webrtcLockCPU);
     pmLockRelease(webrtcLockLS);
     streaming = false;
-    cfgSetQuiet("webrtc_up", "0");
+    storageSetQuiet("webrtc.up", "0");
     info("WebRTC: streaming stopped\n");
 }
 
 /* ---- UDP socket management ---- */
 
 static void openUdpSocket() {
-    int port = cfgGetInt("webrtc_port", 0);
+    int port = storageGetInt("s.net.webrtc_port", 0);
     if (port <= 0) return;
     if (udpFd >= 0) return;
 
@@ -561,8 +564,8 @@ static void openUdpSocket() {
      * INADDR_ANY + sendto through WireGuard doesn't route correctly. */
     addr.sin_addr.s_addr = INADDR_ANY;
     { char wgAddr[16] = {};
-      cfgGetStr("wg_address", wgAddr, sizeof(wgAddr));
-      if (wgAddr[0] && cfgGetInt("wg_up", 0))
+      storageGetStr("s.wg.address", wgAddr, sizeof(wgAddr));
+      if (wgAddr[0] && storageGetInt("wg.up", 0))
           inet_aton(wgAddr, &addr.sin_addr);
     }
     if (bind(udpFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
@@ -589,7 +592,10 @@ static void webrtcTaskFn(void*) {
     ipcEnsureRegistered("webrtc", 8);
 
     /* ITS server for signaling WS */
-    itsServerInit(1, 4096, 4096, webrtcItsConnect, webrtcItsBusy, webrtcItsDisconnect, nullptr);
+    itsServerInit(1, 4096, 4096);
+    itsServerOnConnect(webrtcItsConnect);
+    itsServerOnBusy(webrtcItsBusy);
+    itsServerOnDisconnect(webrtcItsDisconnect);
 
     /* Register /dc WebSocket endpoint with web task */
     { web_path_msg_t reg = {};
@@ -598,6 +604,15 @@ static void webrtcTaskFn(void*) {
       while (!itsSendAux("web", &reg, sizeof(reg), pdMS_TO_TICKS(500)))
           vTaskDelay(pdMS_TO_TICKS(100));
     }
+
+    /* Subscribe to webrtc_port changes — callback fires via itsPoll() */
+    storageSubscribeChanges("s.net.webrtc_port", ON_CHANGE {
+        stopStreaming();
+        if (dtlsConnected) dtlsSessionFree();
+        closeUdpSocket();
+        peerKnown = false;
+        openUdpSocket();
+    });
 
     /* Generate ICE credentials */
     { uint32_t r = esp_random();
@@ -636,16 +651,6 @@ static void webrtcTaskFn(void*) {
                     peerKnown = false;
                     break;
 
-                case MSG_CFG_CHANGED:
-                    if (strcmp(msg.cfg.key, "webrtc_port") == 0) {
-                        stopStreaming();
-                        if (dtlsConnected) dtlsSessionFree();
-                        closeUdpSocket();
-                        peerKnown = false;
-                        openUdpSocket();
-                    }
-                    break;
-
                 case MSG_CAM_FRAME:
                     if (streaming && sctp.established) {
                         camera_fb_t* fb = cameraGetFrame();
@@ -680,8 +685,8 @@ static void webrtcTaskFn(void*) {
             }
         }
 
-        /* Poll ITS for signaling messages */
-        itsPoll();
+        /* Poll ITS for signaling + config change messages */
+        while (itsPoll()) {}
         if (itsHandle >= 0) {
             char sigBuf[2048];
             size_t n = 0;
@@ -722,9 +727,12 @@ static void webrtcTaskFn(void*) {
 
                 if (isStunPacket(rxBuf, n)) {
                     handleStunRequest(rxBuf, n, &from);
+                } else if (!dtlsSessionActive) {
+                    /* No DTLS session yet (before SDP exchange) — drop */
+                    continue;
                 } else {
                     /* Set DTLS client transport ID on first non-STUN (DTLS) packet */
-                    if (!dtlsConnected && dtlsReady) {
+                    if (!dtlsConnected) {
                         uint8_t clientId[6];
                         memcpy(clientId, &from.sin_addr, 4);
                         memcpy(clientId + 4, &from.sin_port, 2);
@@ -739,7 +747,7 @@ static void webrtcTaskFn(void*) {
                     bioRecvBuf = rxBuf;
                     bioRecvLen = n;
 
-                    if (!dtlsConnected && dtlsReady) {
+                    if (!dtlsConnected && dtlsSessionActive) {
                         /* Skip retransmitted handshake packets (same size = likely retransmit).
                          * Retransmits cause mbedTLS to re-derive keys if ServerHello random changes. */
                         if ((size_t)n == lastHandshakeLen) {

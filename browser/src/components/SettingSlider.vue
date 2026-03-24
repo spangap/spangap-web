@@ -19,7 +19,7 @@ import { useDeviceStore } from '../stores/device'
 const props = defineProps<{ label: string; k: string; min: number; max: number }>()
 const device = useDeviceStore()
 
-const intVal = computed(() => parseInt(device.settings[props.k] ?? '0', 10))
+const intVal = computed(() => Number(device.get(props.k) ?? 0))
 
 function onChange(val: number) {
   device.set(props.k, val)
