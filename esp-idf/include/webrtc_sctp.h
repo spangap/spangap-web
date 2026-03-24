@@ -1,5 +1,5 @@
 /**
- * dc_sctp — Minimal SCTP for WebRTC DataChannel.
+ * webrtc_sctp — Minimal SCTP for WebRTC DataChannel.
  *
  * Implements only what browsers need:
  *   - INIT/INIT-ACK/COOKIE-ECHO/COOKIE-ACK handshake (server role)
@@ -10,8 +10,8 @@
  *
  * Runs over DTLS — caller handles encrypt/decrypt.
  */
-#ifndef SECCAM_DC_SCTP_H
-#define SECCAM_DC_SCTP_H
+#ifndef SECCAM_WEBRTC_SCTP_H
+#define SECCAM_WEBRTC_SCTP_H
 
 #include <stdint.h>
 #include <stddef.h>

@@ -1,5 +1,5 @@
 /**
- * dc_sctp — Minimal SCTP for WebRTC DataChannel.
+ * webrtc_sctp — Minimal SCTP for WebRTC DataChannel.
  *
  * Server-side only (browser initiates). Supports:
  *   - Four-way handshake with stateless cookie
@@ -9,7 +9,7 @@
  *   - HEARTBEAT/HEARTBEAT-ACK
  *   - CRC32C checksum
  */
-#include "dc_sctp.h"
+#include "webrtc_sctp.h"
 #include "log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
