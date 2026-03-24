@@ -34,8 +34,8 @@ idf.py -p /dev/tty.usbmodem2101 flash    # flashes everything including spiffs
 
 ## Architecture
 
-Single task on core 1 (stack 4096, queue depth 4). Polls for incoming HTTP connections with `select()`. Reacts to `MSG_CFG_CHANGED`/`MSG_NETWORK_IS_UP` for port updates and `MSG_NETWORK_DOWN` to close server socket. Blocks indefinitely on IPC queue when server socket is closed.
+Single task on core 1. Polls for incoming HTTP connections with `select()`. Subscribes to `net.up` ephemeral var via `storageSubscribeChanges` for network state changes — opens server sockets when network comes up, closes them on network down. Blocks on `ulTaskNotifyTake` + `itsPoll` when server socket is closed.
 
-### webRegister API
+### Endpoint registration via ITS aux
 
-Endpoints (RTSP, log, CLI) register via `webRegister()`, which supports both a WS path and a TCP port per endpoint. The web task manages all registered TCP listen sockets alongside its own HTTP/HTTPS ports, and dispatches incoming WS connections on matching paths. This centralizes port management and TLS handling in the web task.
+Endpoints (RTSP, log, CLI, storage/config) register via ITS aux messages (`web_path_msg_t` for WS paths, `net_port_msg_t` for TCP ports). Tasks send these during their init to register URL prefixes and TCP listen ports. On a matching HTTP request, the web task injects the HTTP headers back (`itsServerInject`) and forwards the connection to the target task (`itsServerForward`). This centralizes port management and TLS handling in the web/net tasks — consumer tasks never see raw sockets.

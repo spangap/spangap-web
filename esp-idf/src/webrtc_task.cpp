@@ -17,7 +17,6 @@
 #include "tls.h"
 #include "camera.h"
 #include "audio.h"
-#include "video.h"
 #include "net.h"
 #include "web.h"
 #include "net.h"
@@ -86,6 +85,8 @@ static uint8_t sctpBuf[SCTP_BUF_SIZE];
 static size_t lastHandshakeLen = 0;
 
 /* Streaming */
+#define MAX_JPEG_SIZE (200 * 1024)
+static uint8_t* frameBuf = nullptr;   /* PSRAM buffer for JPEG frame copy */
 static bool camSubscribed = false;
 static bool audSubscribed = false;
 static bool streaming = false;
@@ -460,7 +461,7 @@ static void handleSignalingMsg(const char* msg, size_t len) {
 
         info("WebRTC: received SDP offer (%d bytes)\n", (int)sdpOffer.size());
 
-        /* Ensure DTLS is ready (may have missed MSG_NETWORK_IS_UP if TLS wasn't ready) */
+        /* Ensure DTLS is ready (may have missed net.up notification if TLS wasn't ready) */
         dtlsSetup();
         if (!dtlsReady) {
             err("WebRTC: DTLS not ready (TLS cert missing?)\n");
@@ -506,8 +507,10 @@ static void handleSignalingMsg(const char* msg, size_t len) {
 static void startStreaming() {
     if (streaming) return;
 
-    camSubscribed = cameraCreateSlot();
-    if (!camSubscribed) { err("WebRTC: no camera slot\n"); return; }
+    int fps = storageGetInt("s.stream.fps", 20);
+    cameraSubscribe(fps);
+    camSubscribed = true;
+
     audSubscribed = audioCreateSlot();
 
     /* Configure audio: HPF + gain from streaming config */
@@ -525,25 +528,21 @@ static void startStreaming() {
         audioGo(false);
     }
 
-    int fps = storageGetInt("s.stream.fps", 20);
-    videoSetFps(fps);
-    cameraGo(false);
-
     pmLockAcquire(webrtcLockLS);
     pmLockAcquire(webrtcLockCPU);
     streaming = true;
-    storageSetQuiet("webrtc.up", "1");
+    storageSet("webrtc.up", "1");
     info("WebRTC: streaming started\n");
 }
 
 static void stopStreaming() {
     if (!streaming) return;
-    if (camSubscribed) { cameraStop(); camSubscribed = false; }
+    if (camSubscribed) { cameraUnsubscribe(); camSubscribed = false; }
     if (audSubscribed) { audioStop(); audSubscribed = false; }
     pmLockRelease(webrtcLockCPU);
     pmLockRelease(webrtcLockLS);
     streaming = false;
-    storageSetQuiet("webrtc.up", "0");
+    storageSet("webrtc.up", "0");
     info("WebRTC: streaming stopped\n");
 }
 
@@ -605,13 +604,24 @@ static void webrtcTaskFn(void*) {
           vTaskDelay(pdMS_TO_TICKS(100));
     }
 
-    /* Subscribe to webrtc_port changes — callback fires via itsPoll() */
+    /* Subscribe to config changes — callbacks fire via itsPoll() */
     storageSubscribeChanges("s.net.webrtc_port", ON_CHANGE {
         stopStreaming();
         if (dtlsConnected) dtlsSessionFree();
         closeUdpSocket();
         peerKnown = false;
         openUdpSocket();
+    });
+    storageSubscribeChanges("net.up", ON_CHANGE {
+        if (atoi(val)) {
+            dtlsSetup();
+            openUdpSocket();
+        } else {
+            stopStreaming();
+            if (dtlsConnected) dtlsSessionFree();
+            closeUdpSocket();
+            peerKnown = false;
+        }
     });
 
     /* Generate ICE credentials */
@@ -635,53 +645,34 @@ static void webrtcTaskFn(void*) {
         /* Yield to IDLE0 for watchdog feed (DC runs at prio 2 on core 0) */
         vTaskDelay(1);
 
-        /* Process IPC messages — drain all pending before doing I/O */
-        ipc_msg_t msg;
-        while (ipcReceive(&msg, streaming ? 0 : (udpFd >= 0 ? 50 : -1))) {
-            switch (msg.type) {
-                case MSG_NETWORK_IS_UP:
-                    dtlsSetup();
-                    openUdpSocket();
-                    break;
-
-                case MSG_NETWORK_DOWN:
-                    stopStreaming();
-                    if (dtlsConnected) dtlsSessionFree();
-                    closeUdpSocket();
-                    peerKnown = false;
-                    break;
-
-                case MSG_CAM_FRAME:
-                    if (streaming && sctp.established) {
-                        camera_fb_t* fb = cameraGetFrame();
-                        if (fb) {
-                            int vidCh = sctpFindChannel(&sctp, "video");
-                            if (vidCh >= 0) {
-                                sctpSend(&sctp, sctp.channels[vidCh].streamId,
-                                         PPID_BINARY, fb->buf, fb->len,
-                                         dtlsSctpSend, nullptr);
-                            }
-                        }
+        /* Process IPC messages (audio chunks) — drain all pending */
+        { ipc_msg_t msg;
+          while (ipcReceive(&msg, streaming ? 0 : (udpFd >= 0 ? 50 : -1))) {
+            if (msg.type == MSG_AUDIO_CHUNK && streaming && sctp.established && audSubscribed) {
+                size_t audioLen = 0;
+                const uint8_t* audioData = audioGetChunk(webrtcHandle, &audioLen);
+                if (audioData && audioLen > 0) {
+                    int audCh = sctpFindChannel(&sctp, "audio");
+                    if (audCh >= 0) {
+                        sctpSend(&sctp, sctp.channels[audCh].streamId,
+                                 PPID_BINARY, audioData, audioLen,
+                                 dtlsSctpSend, nullptr);
                     }
-                    break;
+                }
+            }
+          }
+        }
 
-                case MSG_AUDIO_CHUNK:
-                    if (streaming && sctp.established && audSubscribed) {
-                        size_t audioLen = 0;
-                        const uint8_t* audioData = audioGetChunk(webrtcHandle, &audioLen);
-                        if (audioData && audioLen > 0) {
-                            int audCh = sctpFindChannel(&sctp, "audio");
-                            if (audCh >= 0) {
-                                sctpSend(&sctp, sctp.channels[audCh].streamId,
-                                         PPID_BINARY, audioData, audioLen,
-                                         dtlsSctpSend, nullptr);
-                            }
-                        }
-                    }
-                    break;
-
-                default:
-                    break;
+        /* Video */
+        if (streaming && sctp.established && camSubscribed) {
+            size_t len = cameraGetFrame(frameBuf, MAX_JPEG_SIZE, nullptr, nullptr, nullptr, 5);
+            if (len > 0) {
+                int vidCh = sctpFindChannel(&sctp, "video");
+                if (vidCh >= 0) {
+                    sctpSend(&sctp, sctp.channels[vidCh].streamId,
+                             PPID_BINARY, frameBuf, len,
+                             dtlsSctpSend, nullptr);
+                }
             }
         }
 
@@ -826,6 +817,7 @@ static void webrtcTaskFn(void*) {
 /* ---- Init ---- */
 
 void webrtcInit() {
+    frameBuf = (uint8_t*)heap_caps_malloc(MAX_JPEG_SIZE, MALLOC_CAP_SPIRAM);
     pmLockCreate(PM_NO_LIGHT_SLEEP, "webrtc", &webrtcLockLS);
     pmLockCreate(PM_CPU_FREQ_MAX, "webrtc", &webrtcLockCPU);
     xTaskCreatePinnedToCoreWithCaps(webrtcTaskFn, "webrtc", 12288, nullptr, 2, &webrtcHandle, 0, MALLOC_CAP_SPIRAM);
