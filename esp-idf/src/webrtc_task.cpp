@@ -401,16 +401,16 @@ static std::string generateSdpAnswer(const char* offerSdp) {
 static void stopStreaming();
 static bool webrtcWsClient = false;
 
-static bool webrtcItsConnect(int handle, int itsPort, const void* data, size_t len) {
+static int webrtcItsConnect(int handle, int itsPort, const void* data, size_t len) {
     if (itsHandle >= 0) itsServerKick(itsHandle);
     itsHandle = handle;
     webrtcWsClient = false;
     if (len >= sizeof(net_connect_t) && ((const net_connect_t*)data)->ws) {
-        if (!wsUpgrade(handle)) { info("WebRTC: WS upgrade failed\n"); return false; }
+        if (!wsUpgrade(handle)) { info("WebRTC: WS upgrade failed\n"); return -1; }
         webrtcWsClient = true;
     }
     info("WebRTC: signaling client connected%s\n", webrtcWsClient ? " (WS)" : "");
-    return true;
+    return 0;
 }
 
 static bool webrtcItsBusy(int itsPort, const void* data, size_t len) {
@@ -570,48 +570,112 @@ static void stopStreaming() {
 
 /* ---- UDP socket management ---- */
 
+static void handleUdpPacket(const uint8_t* buf, size_t n,
+                            const struct sockaddr_in* from) {
+    dbg("WebRTC: UDP recv %d bytes from %s:%d\n", (int)n,
+        inet_ntoa(from->sin_addr), ntohs(from->sin_port));
+
+    peerAddr = *from;
+    peerKnown = true;
+    lastUdpRxMs = millis();
+
+    if (isStunPacket(buf, n)) {
+        handleStunRequest(buf, n, from);
+        return;
+    }
+    if (!dtlsSessionActive) return;
+
+    /* Set DTLS client transport ID on first non-STUN (DTLS) packet */
+    if (!dtlsConnected) {
+        uint8_t clientId[6];
+        memcpy(clientId, &from->sin_addr, 4);
+        memcpy(clientId + 4, &from->sin_port, 2);
+        mbedtls_ssl_set_client_transport_id(&dtls, clientId, 6);
+    } else if (n >= 1 && buf[0] != 23) {
+        dbg("WebRTC: ignoring DTLS record type=%d after handshake\n", buf[0]);
+        return;
+    }
+
+    /* Feed to DTLS */
+    bioRecvBuf = (uint8_t*)buf;
+    bioRecvLen = n;
+
+    if (!dtlsConnected && dtlsSessionActive) {
+        if (n == lastHandshakeLen) {
+            dbg("WebRTC: skipping likely retransmit (%d bytes)\n", (int)n);
+            return;
+        }
+        lastHandshakeLen = n;
+        dbg("WebRTC: DTLS handshake step (%d bytes from %s)\n",
+             (int)n, inet_ntoa(from->sin_addr));
+        int ret = mbedtls_ssl_handshake(&dtls);
+        if (ret == 0) {
+            dtlsConnected = true;
+            info("WebRTC: DTLS connected\n");
+        } else if (ret == MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED) {
+            dbg("WebRTC: DTLS hello verify required (normal)\n");
+            mbedtls_ssl_session_reset(&dtls);
+        } else if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
+                   ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
+            char errbuf[128];
+            mbedtls_strerror(ret, errbuf, sizeof(errbuf));
+            err("WebRTC: DTLS handshake: -0x%04x %s\n", -ret, errbuf);
+            mbedtls_ssl_session_reset(&dtls);
+        }
+    } else {
+        uint8_t plainBuf[2048];
+        int ret = mbedtls_ssl_read(&dtls, plainBuf, sizeof(plainBuf));
+        dbg("WebRTC: DTLS read: ret=%d\n", ret);
+        if (ret > 0) {
+            size_t outLen = 0;
+            sctpInput(&sctp, plainBuf, ret, &outLen);
+            dbg("WebRTC: SCTP input %d bytes, response %d bytes, channels=%d\n",
+                 ret, (int)outLen, sctp.numChannels);
+            if (outLen > 0) {
+                int wr = dtlsSctpSend(sctp.outBuf, outLen, nullptr);
+                dbg("WebRTC: dtlsSend(%d) = %d\n", (int)outLen, wr);
+            }
+            if (sctp.numChannels > 0 && !streaming)
+                startStreaming();
+        } else if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY ||
+                   ret == MBEDTLS_ERR_SSL_CONN_EOF) {
+            info("WebRTC: DTLS closed by peer\n");
+            stopStreaming();
+            dtlsSessionFree();
+            dtlsSessionInit();
+            sctpInit(&sctp, sctpBuf, sizeof(sctpBuf), SCTP_PORT);
+            peerKnown = false;
+        }
+    }
+}
+
 static void openUdpSocket() {
     int port = storageGetInt("s.net.webrtc_port", 0);
     if (port <= 0) return;
     if (udpFd >= 0) return;
 
-    udpFd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (udpFd < 0) { err("WebRTC: socket: %d\n", errno); return; }
+    /* Register ITS handler for incoming UDP packets on this port */
+    itsOnAux([](TaskHandle_t, uint16_t, const void* data, size_t len) {
+        auto* pkt = (const net_udp_packet_t*)data;
+        if (len >= offsetof(net_udp_packet_t, data) + pkt->len)
+            handleUdpPacket(pkt->data, pkt->len, &pkt->from);
+    }, port);
 
-    struct sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    /* Bind to specific WireGuard IP if available, else INADDR_ANY.
-     * INADDR_ANY + sendto through WireGuard doesn't route correctly. */
-    addr.sin_addr.s_addr = INADDR_ANY;
-    { char wgAddr[16] = {};
-      storageGetStr("s.wg.address", wgAddr, sizeof(wgAddr));
-      if (wgAddr[0] && storageGetInt("wg.up", 0))
-          inet_aton(wgAddr, &addr.sin_addr);
-    }
-    if (bind(udpFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        err("WebRTC: bind port %d: %d\n", port, errno);
-        close(udpFd);
-        udpFd = -1;
-        return;
-    }
-
-    /* Non-blocking */
-    int flags = fcntl(udpFd, F_GETFL, 0);
-    fcntl(udpFd, F_SETFL, flags | O_NONBLOCK);
-
+    udpFd = netUdpListen(port);
+    if (udpFd < 0) { err("WebRTC: UDP port %d failed\n", port); return; }
     info("WebRTC: UDP port %d open\n", port);
 }
 
 static void closeUdpSocket() {
-    if (udpFd >= 0) { close(udpFd); udpFd = -1; }
+    if (udpFd >= 0) { netUdpClose(udpFd); udpFd = -1; }
 }
 
 /* ---- Main task ---- */
 
 static void webrtcTaskFn(void*) {
     /* ITS server for signaling WS */
-    itsServerInit(1, 4096, 4096);
+    /* Inbox: 1600 byte items (UDP packets up to 1500 + header), depth 4 */
+    itsServerInit(1, 4096, 4096, 1600, 4);
     itsServerOnConnect(webrtcItsConnect);
     itsServerOnBusy(webrtcItsBusy);
     itsServerOnDisconnect(webrtcItsDisconnect);
@@ -659,8 +723,6 @@ static void webrtcTaskFn(void*) {
         openUdpSocket();
     }
 
-    uint8_t rxBuf[2048];
-
     for (;;) {
         /* Poll ITS: frame callback, signaling, config changes */
         while (itsPoll()) {}
@@ -696,104 +758,7 @@ static void webrtcTaskFn(void*) {
             }
         }
 
-        /* Poll UDP socket */
-        if (udpFd >= 0) {
-            struct sockaddr_in from = {};
-            socklen_t fromLen = sizeof(from);
-            int n = recvfrom(udpFd, rxBuf, sizeof(rxBuf), MSG_DONTWAIT,
-                             (struct sockaddr*)&from, &fromLen);
-            if (n > 0) {
-                dbg("WebRTC: UDP recv %d bytes from %s:%d\n", n,
-                    inet_ntoa(from.sin_addr), ntohs(from.sin_port));
-                /* Update peer address for ALL packets */
-                peerAddr = from;
-                peerKnown = true;
-                lastUdpRxMs = millis();
-
-                if (isStunPacket(rxBuf, n)) {
-                    handleStunRequest(rxBuf, n, &from);
-                } else if (!dtlsSessionActive) {
-                    /* No DTLS session yet (before SDP exchange) — drop */
-                    continue;
-                } else {
-                    /* Set DTLS client transport ID on first non-STUN (DTLS) packet */
-                    if (!dtlsConnected) {
-                        uint8_t clientId[6];
-                        memcpy(clientId, &from.sin_addr, 4);
-                        memcpy(clientId + 4, &from.sin_port, 2);
-                        mbedtls_ssl_set_client_transport_id(&dtls, clientId, 6);
-                    } else if (dtlsConnected && n >= 1 && rxBuf[0] != 23) {
-                        /* After handshake, ignore non-application-data records
-                         * (retransmitted CCS/handshake messages that corrupt state) */
-                        dbg("WebRTC: ignoring DTLS record type=%d after handshake\n", rxBuf[0]);
-                        continue;
-                    }
-                    /* Feed to DTLS */
-                    bioRecvBuf = rxBuf;
-                    bioRecvLen = n;
-
-                    if (!dtlsConnected && dtlsSessionActive) {
-                        /* Skip retransmitted handshake packets (same size = likely retransmit).
-                         * Retransmits cause mbedTLS to re-derive keys if ServerHello random changes. */
-                        if ((size_t)n == lastHandshakeLen) {
-                            dbg("WebRTC: skipping likely retransmit (%d bytes)\n", n);
-                            continue;
-                        }
-                        lastHandshakeLen = n;
-                        /* Continue handshake */
-                        dbg("WebRTC: DTLS handshake step (%d bytes from %s)\n",
-                             n, inet_ntoa(from.sin_addr));
-                        int ret = mbedtls_ssl_handshake(&dtls);
-                        if (ret == 0) {
-                            dtlsConnected = true;
-                            info("WebRTC: DTLS connected\n");
-                            continue; /* don't read immediately — let next iteration handle data */
-                        } else if (ret == MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED) {
-                            dbg("WebRTC: DTLS hello verify required (normal)\n");
-                            mbedtls_ssl_session_reset(&dtls);
-                        } else if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
-                                   ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
-                            char errbuf[128];
-                            mbedtls_strerror(ret, errbuf, sizeof(errbuf));
-                            err("WebRTC: DTLS handshake: -0x%04x %s\n", -ret, errbuf);
-                            mbedtls_ssl_session_reset(&dtls);
-                        } else {
-                            dbg("WebRTC: DTLS handshake: want %s\n",
-                                 ret == MBEDTLS_ERR_SSL_WANT_READ ? "read" : "write");
-                        }
-                    } else {
-                        /* Read decrypted data (SCTP packets) */
-                        bioRecvBuf = rxBuf;
-                        bioRecvLen = n;
-                        uint8_t plainBuf[2048];
-                        int ret = mbedtls_ssl_read(&dtls, plainBuf, sizeof(plainBuf));
-                        dbg("WebRTC: DTLS read: ret=%d\n", ret);
-                        if (ret > 0) {
-                            size_t outLen = 0;
-                            sctpInput(&sctp, plainBuf, ret, &outLen);
-                            dbg("WebRTC: SCTP input %d bytes, response %d bytes, channels=%d\n",
-                                 ret, (int)outLen, sctp.numChannels);
-                            if (outLen > 0) {
-                                int wr = dtlsSctpSend(sctp.outBuf, outLen, nullptr);
-                                dbg("WebRTC: dtlsSend(%d) = %d\n", (int)outLen, wr);
-                            }
-
-                            /* Start streaming once channels are open */
-                            if (sctp.numChannels > 0 && !streaming)
-                                startStreaming();
-                        } else if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY ||
-                                   ret == MBEDTLS_ERR_SSL_CONN_EOF) {
-                            info("WebRTC: DTLS closed by peer\n");
-                            stopStreaming();
-                            dtlsSessionFree();
-                            dtlsSessionInit();
-                            sctpInit(&sctp, sctpBuf, sizeof(sctpBuf), SCTP_PORT);
-                            peerKnown = false;
-                        }
-                    }
-                }
-            }
-        }
+        /* UDP packets now arrive via ITS (handleUdpPacket callback) */
 
         /* Inactivity timeout — peer gone without clean close */
         if (streaming && lastUdpRxMs && millis() - lastUdpRxMs > UDP_TIMEOUT_MS) {
@@ -817,10 +782,6 @@ static void webrtcTaskFn(void*) {
             }
         }
 
-        /* Sleep until ITS notification or UDP poll timeout.
-         * When UDP socket is open, poll at 1 tick for STUN/DTLS packets.
-         * When idle (no socket), block indefinitely on ITS. */
-        ulTaskNotifyTake(pdTRUE, udpFd >= 0 ? 1 : portMAX_DELAY);
     }
 }
 
