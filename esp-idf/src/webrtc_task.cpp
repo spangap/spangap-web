@@ -654,20 +654,22 @@ static void openUdpSocket() {
     if (port <= 0) return;
     if (udpFd >= 0) return;
 
-    /* Register ITS handler for incoming UDP packets on this port */
-    itsOnAux([](TaskHandle_t, uint16_t, const void* data, size_t len) {
-        if (len < sizeof(net_udp_packet_t)) return;
-        auto* pkt = (const net_udp_packet_t*)data;
-        handleUdpPacket(netUdpRing[pkt->slot], pkt->len, &pkt->from);
-    }, port);
-
-    udpFd = netUdpListen(port);
-    if (udpFd < 0) { err("WebRTC: UDP port %d failed\n", port); return; }
+    udpFd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (udpFd < 0) { err("WebRTC: socket: %d\n", errno); return; }
+    struct sockaddr_in addr = {};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = INADDR_ANY;
+    if (bind(udpFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        err("WebRTC: bind port %d: %d\n", port, errno);
+        close(udpFd); udpFd = -1; return;
+    }
+    fcntl(udpFd, F_SETFL, fcntl(udpFd, F_GETFL, 0) | O_NONBLOCK);
     info("WebRTC: UDP port %d open\n", port);
 }
 
 static void closeUdpSocket() {
-    if (udpFd >= 0) { netUdpClose(udpFd); udpFd = -1; }
+    if (udpFd >= 0) { close(udpFd); udpFd = -1; }
 }
 
 /* ---- Main task ---- */
@@ -723,8 +725,22 @@ static void webrtcTaskFn(void*) {
     }
 
     for (;;) {
-        /* Poll ITS: frame callback, signaling, config changes */
-        while (itsPoll()) {}
+        /* ITS messages (camera/audio/signaling) + 1ms timeout for UDP poll */
+        while (itsPoll(udpFd >= 0 ? 1 : portMAX_DELAY)) {}
+
+        /* Drain UDP socket */
+        if (udpFd >= 0) {
+            uint8_t rxBuf[1500];
+            struct sockaddr_in from;
+            socklen_t fromLen;
+            for (;;) {
+                fromLen = sizeof(from);
+                int n = recvfrom(udpFd, rxBuf, sizeof(rxBuf), MSG_DONTWAIT,
+                                 (struct sockaddr*)&from, &fromLen);
+                if (n <= 0) break;
+                handleUdpPacket(rxBuf, n, &from);
+            }
+        }
 
         /* Audio: poll ready flag directly — ITS single-message inbox may
          * drop the audio notification when camera holds the semaphore. */
