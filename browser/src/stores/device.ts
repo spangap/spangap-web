@@ -177,5 +177,11 @@ export const useDeviceStore = defineStore('device', () => {
 
   connect()
 
+  /* Clean close on page unload — lets server free ITS handle immediately */
+  window.addEventListener('beforeunload', () => {
+    reloading = true  /* suppress reconnect */
+    if (ws) { ws.close(); ws = null }
+  })
+
   return { settings, connected, get, set, save, connect }
 })

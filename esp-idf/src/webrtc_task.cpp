@@ -91,6 +91,10 @@ static bool camSubscribed = false;
 static bool audSubscribed = false;
 static bool streaming = false;
 
+/* Inactivity timeout: no UDP packets for this long → tear down session */
+static constexpr uint32_t UDP_TIMEOUT_MS = 10000;
+static uint32_t lastUdpRxMs = 0;
+
 /* ITS signaling */
 static int itsHandle = -1;  /* current signaling WS client */
 
@@ -166,7 +170,7 @@ static void handleStunRequest(const uint8_t* req, size_t reqLen,
     if (reqLen < 20) return;
     uint16_t msgType = r16(req);
     if (msgType != 0x0001) {
-        info("WebRTC: STUN non-binding msg type 0x%04x\n", msgType);
+        dbg("WebRTC: STUN non-binding msg type 0x%04x\n", msgType);
         return;
     }
     dbg("WebRTC: STUN binding request from %s:%d\n",
@@ -281,7 +285,7 @@ static void dtlsExportKeys(void *p_expkey,
         pos += snprintf(line + pos, sizeof(line) - pos, " ");
         for (size_t i = 0; i < secret_len; i++)
             pos += snprintf(line + pos, sizeof(line) - pos, "%02x", secret[i]);
-        info("WebRTC: KEYLOG %s\n", line);
+        dbg("WebRTC: KEYLOG %s\n", line);
     }
 }
 
@@ -421,8 +425,9 @@ static void webrtcItsDisconnect(int handle) {
     webrtcWsClient = false;
     info("WebRTC: signaling client disconnected\n");
     stopStreaming();
-    if (dtlsConnected) dtlsSessionFree();
+    if (dtlsSessionActive) dtlsSessionFree();
     peerKnown = false;
+    lastUdpRxMs = 0;
     sctpInit(&sctp, sctpBuf, sizeof(sctpBuf), SCTP_PORT);
 }
 
@@ -459,7 +464,7 @@ static void handleSignalingMsg(const char* msg, size_t len) {
             }
         }
 
-        info("WebRTC: received SDP offer (%d bytes)\n", (int)sdpOffer.size());
+        dbg("WebRTC: received SDP offer (%d bytes)\n", (int)sdpOffer.size());
 
         /* Ensure DTLS is ready (may have missed net.up notification if TLS wasn't ready) */
         dtlsSetup();
@@ -481,7 +486,7 @@ static void handleSignalingMsg(const char* msg, size_t len) {
         }
 
         std::string resp = "{\"type\":\"answer\",\"sdp\":\"" + escaped + "\"}";
-        info("WebRTC: SDP answer:\n%s\n", answer.c_str());
+        dbg("WebRTC: SDP answer:\n%s\n", answer.c_str());
         if (itsHandle >= 0) {
             if (webrtcWsClient)
                 wsSendText(itsHandle, resp.c_str(), resp.size());
@@ -498,7 +503,7 @@ static void handleSignalingMsg(const char* msg, size_t len) {
         peerKnown = false;
         lastHandshakeLen = 0;
 
-        info("WebRTC: sent SDP answer, waiting for ICE+DTLS\n");
+        dbg("WebRTC: sent SDP answer, waiting for ICE+DTLS\n");
     }
 }
 
@@ -715,6 +720,7 @@ static void webrtcTaskFn(void*) {
                 /* Update peer address for ALL packets */
                 peerAddr = from;
                 peerKnown = true;
+                lastUdpRxMs = millis();
 
                 if (isStunPacket(rxBuf, n)) {
                     handleStunRequest(rxBuf, n, &from);
@@ -742,20 +748,20 @@ static void webrtcTaskFn(void*) {
                         /* Skip retransmitted handshake packets (same size = likely retransmit).
                          * Retransmits cause mbedTLS to re-derive keys if ServerHello random changes. */
                         if ((size_t)n == lastHandshakeLen) {
-                            info("WebRTC: skipping likely retransmit (%d bytes)\n", n);
+                            dbg("WebRTC: skipping likely retransmit (%d bytes)\n", n);
                             continue;
                         }
                         lastHandshakeLen = n;
                         /* Continue handshake */
-                        info("WebRTC: DTLS handshake step (%d bytes from %s)\n",
+                        dbg("WebRTC: DTLS handshake step (%d bytes from %s)\n",
                              n, inet_ntoa(from.sin_addr));
                         int ret = mbedtls_ssl_handshake(&dtls);
                         if (ret == 0) {
                             dtlsConnected = true;
-                            info("WebRTC: DTLS connected!\n");
+                            info("WebRTC: DTLS connected\n");
                             continue; /* don't read immediately — let next iteration handle data */
                         } else if (ret == MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED) {
-                            info("WebRTC: DTLS hello verify required (normal)\n");
+                            dbg("WebRTC: DTLS hello verify required (normal)\n");
                             mbedtls_ssl_session_reset(&dtls);
                         } else if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
                                    ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
@@ -764,7 +770,7 @@ static void webrtcTaskFn(void*) {
                             err("WebRTC: DTLS handshake: -0x%04x %s\n", -ret, errbuf);
                             mbedtls_ssl_session_reset(&dtls);
                         } else {
-                            info("WebRTC: DTLS handshake: want %s\n",
+                            dbg("WebRTC: DTLS handshake: want %s\n",
                                  ret == MBEDTLS_ERR_SSL_WANT_READ ? "read" : "write");
                         }
                     } else {
@@ -799,6 +805,17 @@ static void webrtcTaskFn(void*) {
                     }
                 }
             }
+        }
+
+        /* Inactivity timeout — peer gone without clean close */
+        if (streaming && lastUdpRxMs && millis() - lastUdpRxMs > UDP_TIMEOUT_MS) {
+            info("WebRTC: no UDP activity for %us, tearing down\n", (unsigned)(UDP_TIMEOUT_MS / 1000));
+            stopStreaming();
+            dtlsSessionFree();
+            dtlsSessionInit();
+            sctpInit(&sctp, sctpBuf, sizeof(sctpBuf), SCTP_PORT);
+            peerKnown = false;
+            lastUdpRxMs = 0;
         }
 
         /* Continue DTLS handshake retransmission timer */

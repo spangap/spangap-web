@@ -184,7 +184,7 @@ static size_t buildInitAck(sctp_assoc_t* a, const uint8_t* initChunk, size_t ini
     w16(out + chunkStart + 2, (uint16_t)(pos - chunkStart));
 
     sctpSetChecksum(out, pos);
-    info("SCTP INIT-ACK %d bytes, vTag=0x%08x myTag=0x%08x\n",
+    dbg("SCTP INIT-ACK %d bytes, vTag=0x%08x myTag=0x%08x\n",
          (int)pos, (unsigned)peerTag, (unsigned)myTag);
     return pos;
 }
@@ -256,7 +256,7 @@ static size_t handleDcepOpen(sctp_assoc_t* a, uint16_t streamId,
             memcpy(ch->label, data + 12, labelLen);
         ch->label[labelLen < sizeof(ch->label) ? labelLen : sizeof(ch->label) - 1] = '\0';
         a->numChannels++;
-        info("DC channel %d: \"%s\" type=%d stream=%u\n",
+        dbg("DC channel %d: \"%s\" type=%d stream=%u\n",
              a->numChannels - 1, ch->label, channelType, streamId);
     }
 
@@ -346,7 +346,7 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
         switch (type) {
             case SCTP_INIT:
                 /* INIT must have vTag=0 */
-                if (vTag != 0) { info("SCTP INIT bad vTag=%u\n", (unsigned)vTag); break; }
+                if (vTag != 0) { dbg("SCTP INIT bad vTag=%u\n", (unsigned)vTag); break; }
                 *outLen = buildInitAck(a, chunk + 4, chunkLen - 4, srcPort,
                                        a->outBuf, a->outBufSize);
                 break;
