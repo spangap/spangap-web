@@ -572,7 +572,7 @@ static void stopStreaming() {
 
 static void handleUdpPacket(const uint8_t* buf, size_t n,
                             const struct sockaddr_in* from) {
-    dbg("WebRTC: UDP recv %d bytes from %s:%d\n", (int)n,
+    dbg("UDP recv %d bytes from %s:%d\n", (int)n,
         inet_ntoa(from->sin_addr), ntohs(from->sin_port));
 
     peerAddr = *from;
@@ -656,9 +656,9 @@ static void openUdpSocket() {
 
     /* Register ITS handler for incoming UDP packets on this port */
     itsOnAux([](TaskHandle_t, uint16_t, const void* data, size_t len) {
+        if (len < sizeof(net_udp_packet_t)) return;
         auto* pkt = (const net_udp_packet_t*)data;
-        if (len >= offsetof(net_udp_packet_t, data) + pkt->len)
-            handleUdpPacket(pkt->data, pkt->len, &pkt->from);
+        handleUdpPacket(netUdpRing[pkt->slot], pkt->len, &pkt->from);
     }, port);
 
     udpFd = netUdpListen(port);
@@ -674,8 +674,7 @@ static void closeUdpSocket() {
 
 static void webrtcTaskFn(void*) {
     /* ITS server for signaling WS */
-    /* Inbox: 1600 byte items (UDP packets up to 1500 + header), depth 4 */
-    itsServerInit(1, 4096, 4096, 1600, 4);
+    itsServerInit(1, 4096, 4096);
     itsServerOnConnect(webrtcItsConnect);
     itsServerOnBusy(webrtcItsBusy);
     itsServerOnDisconnect(webrtcItsDisconnect);
