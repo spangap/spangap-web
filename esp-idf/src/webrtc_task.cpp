@@ -10,7 +10,6 @@
 #include "webrtc_sctp.h"
 #include "storage.h"
 #include "compat.h"
-#include "ipc.h"
 #include "pm.h"
 #include "log.h"
 #include "its.h"
@@ -88,7 +87,7 @@ static size_t lastHandshakeLen = 0;
 #define MAX_JPEG_SIZE (200 * 1024)
 static uint8_t* frameBuf = nullptr;   /* PSRAM buffer for JPEG frame copy */
 static bool camSubscribed = false;
-static bool audSubscribed = false;
+static audio_sub_t* audSub = nullptr;
 static bool streaming = false;
 
 /* Inactivity timeout: no UDP packets for this long → tear down session */
@@ -528,22 +527,28 @@ static void startStreaming() {
     cameraSubscribe(fps, onCameraFrame);
     camSubscribed = true;
 
-    audSubscribed = audioCreateSlot();
-
-    /* Configure audio: HPF + gain from streaming config */
-    if (audSubscribed) {
-        audioSetHpf(true);
-        int gain = storageGetInt("s.stream.gain", 1);
-        if (gain > 0) audioSetGain(gain);
-        int agcMax = storageGetInt("s.stream.agc_max", 0);
-        if (agcMax > 0) {
-            audioSetAgc(storageGetInt("s.stream.agc_target", 8000),
-                        storageGetInt("s.stream.agc_attack", 10),
-                        storageGetInt("s.stream.agc_release", 500), agcMax);
-        }
-        audioSetCodec(AUDIO_PCM16);
-        audioGo(false);
+    /* Audio: configure and subscribe */
+    if (!audSub) audSub = new audio_sub_t{};
+    audSub->codec = AUDIO_PCM16;
+    audSub->hpf = true;
+    audSub->gain = storageGetInt("s.stream.gain", 1);
+    int agcMax = storageGetInt("s.stream.agc_max", 0);
+    if (agcMax > 0) {
+        audSub->agc_target = storageGetInt("s.stream.agc_target", 8000);
+        audSub->agc_attack = storageGetInt("s.stream.agc_attack", 10);
+        audSub->agc_release = storageGetInt("s.stream.agc_release", 500);
+        audSub->agc_max = agcMax;
     }
+    audSub->cb = [](audio_sub_t* sub) {
+        if (!streaming || !sctp.established) return;
+        int audCh = sctpFindChannel(&sctp, "audio");
+        if (audCh >= 0) {
+            sctpSend(&sctp, sctp.channels[audCh].streamId,
+                     PPID_BINARY, sub->data, sub->len,
+                     dtlsSctpSend, nullptr);
+        }
+    };
+    audioSubscribe(audSub);
 
     pmLockAcquire(webrtcLockLS);
     pmLockAcquire(webrtcLockCPU);
@@ -555,7 +560,7 @@ static void startStreaming() {
 static void stopStreaming() {
     if (!streaming) return;
     if (camSubscribed) { cameraUnsubscribe(); camSubscribed = false; }
-    if (audSubscribed) { audioStop(); audSubscribed = false; }
+    if (audSub) { audioStop(); }
     pmLockRelease(webrtcLockCPU);
     pmLockRelease(webrtcLockLS);
     streaming = false;
@@ -605,8 +610,6 @@ static void closeUdpSocket() {
 /* ---- Main task ---- */
 
 static void webrtcTaskFn(void*) {
-    ipcEnsureRegistered("webrtc", 8);
-
     /* ITS server for signaling WS */
     itsServerInit(1, 4096, 4096);
     itsServerOnConnect(webrtcItsConnect);
@@ -659,26 +662,15 @@ static void webrtcTaskFn(void*) {
     uint8_t rxBuf[2048];
 
     for (;;) {
-        /* Process IPC messages (audio chunks) — drain all pending */
-        { ipc_msg_t msg;
-          while (ipcReceive(&msg, streaming ? 0 : (udpFd >= 0 ? 50 : -1))) {
-            if (msg.type == MSG_AUDIO_CHUNK && streaming && sctp.established && audSubscribed) {
-                size_t audioLen = 0;
-                const uint8_t* audioData = audioGetChunk(webrtcHandle, &audioLen);
-                if (audioData && audioLen > 0) {
-                    int audCh = sctpFindChannel(&sctp, "audio");
-                    if (audCh >= 0) {
-                        sctpSend(&sctp, sctp.channels[audCh].streamId,
-                                 PPID_BINARY, audioData, audioLen,
-                                 dtlsSctpSend, nullptr);
-                    }
-                }
-            }
-          }
-        }
-
-        /* Poll ITS: frame callbacks + signaling + config changes */
+        /* Poll ITS: frame callback, signaling, config changes */
         while (itsPoll()) {}
+
+        /* Audio: poll ready flag directly — ITS single-message inbox may
+         * drop the audio notification when camera holds the semaphore. */
+        if (audSub && audSub->ready && streaming && sctp.established) {
+            audSub->ready = false;
+            if (audSub->cb) audSub->cb(audSub);
+        }
         if (itsHandle >= 0) {
             char sigBuf[2048];
             size_t n = 0;
