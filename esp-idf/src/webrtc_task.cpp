@@ -509,11 +509,23 @@ static void handleSignalingMsg(const char* msg, size_t len) {
 
 /* ---- Start/stop streaming ---- */
 
+static void onCameraFrame(const camera_fb_t* fb) {
+    if (!streaming || !sctp.established) return;
+    size_t copyLen = fb->len < MAX_JPEG_SIZE ? fb->len : MAX_JPEG_SIZE;
+    memcpy(frameBuf, fb->buf, copyLen);
+    int vidCh = sctpFindChannel(&sctp, "video");
+    if (vidCh >= 0) {
+        sctpSend(&sctp, sctp.channels[vidCh].streamId,
+                 PPID_BINARY, frameBuf, copyLen,
+                 dtlsSctpSend, nullptr);
+    }
+}
+
 static void startStreaming() {
     if (streaming) return;
 
     int fps = storageGetInt("s.stream.fps", 20);
-    cameraSubscribe(fps);
+    cameraSubscribe(fps, onCameraFrame);
     camSubscribed = true;
 
     audSubscribed = audioCreateSlot();
@@ -647,9 +659,6 @@ static void webrtcTaskFn(void*) {
     uint8_t rxBuf[2048];
 
     for (;;) {
-        /* Yield to IDLE0 for watchdog feed (DC runs at prio 2 on core 0) */
-        vTaskDelay(1);
-
         /* Process IPC messages (audio chunks) — drain all pending */
         { ipc_msg_t msg;
           while (ipcReceive(&msg, streaming ? 0 : (udpFd >= 0 ? 50 : -1))) {
@@ -668,20 +677,7 @@ static void webrtcTaskFn(void*) {
           }
         }
 
-        /* Video */
-        if (streaming && sctp.established && camSubscribed) {
-            size_t len = cameraGetFrame(frameBuf, MAX_JPEG_SIZE, nullptr, nullptr, nullptr, 5);
-            if (len > 0) {
-                int vidCh = sctpFindChannel(&sctp, "video");
-                if (vidCh >= 0) {
-                    sctpSend(&sctp, sctp.channels[vidCh].streamId,
-                             PPID_BINARY, frameBuf, len,
-                             dtlsSctpSend, nullptr);
-                }
-            }
-        }
-
-        /* Poll ITS for signaling + config change messages */
+        /* Poll ITS: frame callbacks + signaling + config changes */
         while (itsPoll()) {}
         if (itsHandle >= 0) {
             char sigBuf[2048];
@@ -828,6 +824,11 @@ static void webrtcTaskFn(void*) {
                 info("WebRTC: DTLS connected (timer retry)\n");
             }
         }
+
+        /* Yield to IDLE0 for watchdog — also wakes immediately on ITS
+         * notifications (frame delivery, config changes, signaling).
+         * IDLE0 gets time during cam_task's fb_get blocking (~48ms/frame). */
+        ulTaskNotifyTake(pdTRUE, 1);
     }
 }
 
