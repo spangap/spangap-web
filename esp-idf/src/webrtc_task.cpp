@@ -817,10 +817,10 @@ static void webrtcTaskFn(void*) {
             }
         }
 
-        /* Yield to IDLE0 for watchdog — also wakes immediately on ITS
-         * notifications (frame delivery, config changes, signaling).
-         * IDLE0 gets time during cam_task's fb_get blocking (~48ms/frame). */
-        ulTaskNotifyTake(pdTRUE, 1);
+        /* Sleep until ITS notification or UDP poll timeout.
+         * When UDP socket is open, poll at 1 tick for STUN/DTLS packets.
+         * When idle (no socket), block indefinitely on ITS. */
+        ulTaskNotifyTake(pdTRUE, udpFd >= 0 ? 1 : portMAX_DELAY);
     }
 }
 
