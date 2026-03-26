@@ -89,6 +89,16 @@ static uint8_t* frameBuf = nullptr;   /* PSRAM buffer for JPEG frame copy */
 static bool camSubscribed = false;
 static audio_sub_t* audSub = nullptr;
 static bool streaming = false;
+static uint32_t streamStartMs = 0;    /* millis() at stream start for audio timestamps */
+
+/* Audio bundling: accumulate N×20ms chunks into one 1285-byte DataChannel message.
+ * Header: [codec(1)] [timestamp_ms(4)] [data(1280)] */
+#define AUDIO_BUNDLE_DATA  1280
+#define AUDIO_BUNDLE_HDR   5
+#define AUDIO_BUNDLE_SIZE  (AUDIO_BUNDLE_HDR + AUDIO_BUNDLE_DATA)
+static uint8_t audioBundleBuf[AUDIO_BUNDLE_SIZE];
+static size_t  audioBundlePos = AUDIO_BUNDLE_HDR;  /* write position (after header) */
+static uint32_t audioBundleFirstMs = 0;             /* timestamp of first chunk in bundle */
 
 /* Inactivity timeout: no UDP packets for this long → tear down session */
 static constexpr uint32_t UDP_TIMEOUT_MS = 10000;
@@ -545,13 +555,30 @@ static void startStreaming() {
         audSub->agc_release = storageGetInt("audio.agc_release", 500);
         audSub->agc_max = agcMax;
     }
+    audioBundlePos = AUDIO_BUNDLE_HDR;
+    audioBundleFirstMs = 0;
     audSub->cb = [](audio_sub_t* sub) {
         if (!streaming || !sctp.established) return;
-        int audCh = sctpFindChannel(&sctp, "audio");
-        if (audCh >= 0) {
-            sctpSend(&sctp, sctp.channels[audCh].streamId,
-                     PPID_BINARY, sub->data, sub->len,
-                     dtlsSctpSend, nullptr);
+        if (sub->len == 0 || audioBundlePos + sub->len > AUDIO_BUNDLE_SIZE) return;
+        /* Record timestamp of first chunk in this bundle */
+        if (audioBundlePos == AUDIO_BUNDLE_HDR)
+            audioBundleFirstMs = sub->ms - streamStartMs;
+        memcpy(audioBundleBuf + audioBundlePos, sub->data, sub->len);
+        audioBundlePos += sub->len;
+        /* Send when bundle is full */
+        if (audioBundlePos >= AUDIO_BUNDLE_SIZE) {
+            audioBundleBuf[0] = (uint8_t)sub->codec;
+            audioBundleBuf[1] = (uint8_t)(audioBundleFirstMs >> 24);
+            audioBundleBuf[2] = (uint8_t)(audioBundleFirstMs >> 16);
+            audioBundleBuf[3] = (uint8_t)(audioBundleFirstMs >> 8);
+            audioBundleBuf[4] = (uint8_t)(audioBundleFirstMs);
+            int audCh = sctpFindChannel(&sctp, "audio");
+            if (audCh >= 0) {
+                sctpSend(&sctp, sctp.channels[audCh].streamId,
+                         PPID_BINARY, audioBundleBuf, AUDIO_BUNDLE_SIZE,
+                         dtlsSctpSend, nullptr);
+            }
+            audioBundlePos = AUDIO_BUNDLE_HDR;
         }
     };
     audioSubscribe(audSub);
@@ -559,6 +586,7 @@ static void startStreaming() {
     pmLockAcquire(webrtcLockLS);
     pmLockAcquire(webrtcLockCPU);
     streaming = true;
+    streamStartMs = millis();
     storageSet("webrtc.up", "1");
     info("WebRTC: streaming started\n");
 }
@@ -567,6 +595,7 @@ static void stopStreaming() {
     if (!streaming) return;
     if (camSubscribed) { cameraUnsubscribe(); camSubscribed = false; }
     if (audSub) { audioStop(); }
+    sctpRexmitFree(&sctp);
     pmLockRelease(webrtcLockCPU);
     pmLockRelease(webrtcLockLS);
     streaming = false;
@@ -641,6 +670,8 @@ static void handleUdpPacket(const uint8_t* buf, size_t n,
                 int wr = dtlsSctpSend(sctp.outBuf, outLen, nullptr);
                 dbg("WebRTC: dtlsSend(%d) = %d\n", (int)outLen, wr);
             }
+            /* Retransmit any missing packets reported by SACK */
+            sctpRetransmit(&sctp, dtlsSctpSend, nullptr);
             if (sctp.numChannels > 0 && !streaming)
                 startStreaming();
         } else if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY ||

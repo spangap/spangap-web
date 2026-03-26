@@ -237,6 +237,9 @@ static size_t handleDcepOpen(sctp_assoc_t* a, uint16_t streamId,
 
     /* Parse DCEP OPEN: type(1) channelType(1) priority(2) reliability(4) labelLen(2) protoLen(2) */
     uint8_t channelType = data[1];
+    uint32_t reliability = 0;
+    if (dataLen >= 8)
+        reliability = r32(data + 4);
     uint16_t labelLen = 0;
     if (dataLen >= 12)
         labelLen = r16(data + 8);
@@ -252,6 +255,7 @@ static size_t handleDcepOpen(sctp_assoc_t* a, uint16_t streamId,
         ch->open = true;
         ch->streamId = streamId;
         ch->channelType = channelType;
+        ch->reliability = reliability;
         if (labelLen > 0 && labelLen < sizeof(ch->label) && 12 + labelLen <= dataLen)
             memcpy(ch->label, data + 12, labelLen);
         ch->label[labelLen < sizeof(ch->label) ? labelLen : sizeof(ch->label) - 1] = '\0';
@@ -384,9 +388,33 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
 
             case SCTP_SACK:
                 if (!a->established) break;
-                /* Parse peer's receive window */
-                if (chunkLen >= 12)
+                if (chunkLen >= 16) {
+                    uint32_t cumTsn = r32(chunk + 4);
                     a->peerRwnd = r32(chunk + 8);
+                    a->sackCumTsn = cumTsn;
+                    uint16_t numGaps = r16(chunk + 12);
+                    /* Free acked entries from retransmit buffer */
+                    for (int i = 0; i < SCTP_REXMIT_SLOTS; i++) {
+                        auto& e = a->rexmit[i];
+                        if (!e.data) continue;
+                        /* TSN <= cumTsn means acked */
+                        int32_t diff = (int32_t)(e.tsn - cumTsn);
+                        if (diff <= 0) { free(e.data); e.data = nullptr; continue; }
+                        /* Check if TSN falls in a gap ack block (= received) */
+                        const uint8_t* gaps = chunk + 16;
+                        for (uint16_t g = 0; g < numGaps && 16 + g * 4 + 3 < chunkLen; g++) {
+                            uint16_t start = r16(gaps + g * 4);
+                            uint16_t end   = r16(gaps + g * 4 + 2);
+                            uint32_t gapStart = cumTsn + start;
+                            uint32_t gapEnd   = cumTsn + end;
+                            if (e.tsn >= gapStart && e.tsn <= gapEnd) {
+                                free(e.data); e.data = nullptr; break;
+                            }
+                        }
+                    }
+                    /* Only trigger retransmit when there are actual gaps */
+                    if (numGaps > 0) a->sackHasGaps = true;
+                }
                 break;
 
             case SCTP_HEARTBEAT:
@@ -416,10 +444,21 @@ int sctpSend(sctp_assoc_t* a, uint16_t streamId, uint32_t ppid,
              sctp_send_fn sendFn, void* ctx) {
     if (!a->established) return -1;
 
-    /* Max payload per SCTP packet (leave room for DTLS record + UDP + IP) */
-    const size_t MAX_PAYLOAD = 1200;
+    /* Max payload per SCTP packet — room for DTLS(13) + UDP(8) + IP(20) + WG(60) */
+    const size_t MAX_PAYLOAD = 1400;
     const size_t CHUNK_HDR = 16; /* DATA chunk header */
     const size_t maxData = MAX_PAYLOAD - 12 - CHUNK_HDR; /* minus common header + chunk header */
+
+    /* Look up channel for reliability info */
+    uint8_t maxRexmit = 0;
+    for (int i = 0; i < a->numChannels; i++) {
+        if (a->channels[i].streamId == streamId) {
+            uint8_t ct = a->channels[i].channelType;
+            if (ct == DC_UNRELIABLE_REXMIT || ct == DC_UNRELIABLE_REXMIT_UNO)
+                maxRexmit = (uint8_t)(a->channels[i].reliability & 0xFF);
+            break;
+        }
+    }
 
     int nPkts = 0;
     size_t sent = 0;
@@ -434,7 +473,9 @@ int sctpSend(sctp_assoc_t* a, uint16_t streamId, uint32_t ppid,
         if (first) flags |= SCTP_DATA_B;
         if (last)  flags |= SCTP_DATA_E | SCTP_DATA_I;
 
-        /* Build packet */
+        uint32_t tsn = a->myTsn++;
+
+        /* Build packet on stack */
         uint8_t pkt[12 + CHUNK_HDR + MAX_PAYLOAD + 4]; /* +4 for padding */
         size_t pos = writeHeader(pkt, a->myPort, a->peerPort, a->peerTag);
 
@@ -442,7 +483,7 @@ int sctpSend(sctp_assoc_t* a, uint16_t streamId, uint32_t ppid,
         pkt[pos++] = SCTP_DATA;
         pkt[pos++] = flags;
         pos += 2; /* length placeholder */
-        w32(pkt + pos, a->myTsn++); pos += 4;     /* TSN */
+        w32(pkt + pos, tsn); pos += 4;             /* TSN */
         w16(pkt + pos, streamId); pos += 2;        /* Stream ID */
         w16(pkt + pos, 0); pos += 2;               /* SSN (0 for unordered) */
         w32(pkt + pos, ppid); pos += 4;            /* PPID */
@@ -456,6 +497,23 @@ int sctpSend(sctp_assoc_t* a, uint16_t streamId, uint32_t ppid,
         while (pos % 4) pkt[pos++] = 0;
 
         sctpSetChecksum(pkt, pos);
+
+        /* Save to retransmit buffer if channel has reliability */
+        if (maxRexmit > 0) {
+            int slot = a->rexmitHead;
+            a->rexmitHead = (slot + 1) % SCTP_REXMIT_SLOTS;
+            auto& e = a->rexmit[slot];
+            if (e.data) free(e.data);  /* evict oldest */
+            e.data = (uint8_t*)malloc(pos);
+            if (e.data) {
+                memcpy(e.data, pkt, pos);
+                e.len = (uint16_t)pos;
+                e.tsn = tsn;
+                e.streamId = streamId;
+                e.maxRexmit = maxRexmit;
+                e.rexmitCount = 0;
+            }
+        }
 
         int ret = sendFn(pkt, pos, ctx);
         if (ret == 0) {
@@ -478,4 +536,34 @@ int sctpFindChannel(sctp_assoc_t* a, const char* label) {
     for (int i = 0; i < a->numChannels; i++)
         if (strcmp(a->channels[i].label, label) == 0) return i;
     return -1;
+}
+
+int sctpRetransmit(sctp_assoc_t* a, sctp_send_fn sendFn, void* ctx) {
+    if (!a->established || !a->sackHasGaps) return 0;
+    a->sackHasGaps = false;
+    int count = 0;
+    for (int i = 0; i < SCTP_REXMIT_SLOTS; i++) {
+        auto& e = a->rexmit[i];
+        if (!e.data) continue;
+        /* Skip if already acked */
+        int32_t diff = (int32_t)(e.tsn - a->sackCumTsn);
+        if (diff <= 0) { free(e.data); e.data = nullptr; continue; }
+        /* Retransmit if below max */
+        if (e.rexmitCount < e.maxRexmit) {
+            e.rexmitCount++;
+            sendFn(e.data, e.len, ctx);
+            count++;
+        } else {
+            /* Exhausted retransmits */
+            free(e.data); e.data = nullptr;
+        }
+    }
+    return count;
+}
+
+void sctpRexmitFree(sctp_assoc_t* a) {
+    for (int i = 0; i < SCTP_REXMIT_SLOTS; i++) {
+        if (a->rexmit[i].data) { free(a->rexmit[i].data); a->rexmit[i].data = nullptr; }
+    }
+    a->rexmitHead = 0;
 }

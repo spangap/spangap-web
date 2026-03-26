@@ -61,6 +61,7 @@ typedef struct {
     bool     open;
     uint16_t streamId;
     uint8_t  channelType;  /* DC_RELIABLE, DC_UNRELIABLE_REXMIT_UNO, etc. */
+    uint32_t reliability;  /* maxRetransmits or maxPacketLifeTime (from DCEP) */
     char     label[32];
 } dc_channel_t;
 
@@ -85,6 +86,21 @@ typedef struct {
 
     /* Send state */
     uint16_t ssn[DC_MAX_CHANNELS]; /* per-stream sequence number (for ordered) */
+
+    /* Retransmit buffer for channels with maxRetransmits > 0 */
+    #define SCTP_REXMIT_SLOTS 32
+    struct rexmit_entry_t {
+        uint32_t tsn;
+        uint16_t streamId;
+        uint8_t  maxRexmit;   /* from channel config */
+        uint8_t  rexmitCount; /* times retransmitted so far */
+        uint8_t* data;        /* heap-allocated packet (ready to send) */
+        uint16_t len;
+    };
+    rexmit_entry_t rexmit[SCTP_REXMIT_SLOTS];
+    int rexmitHead;  /* next slot to write */
+    uint32_t sackCumTsn; /* last cumulative TSN acked by peer */
+    bool     sackHasGaps; /* set when SACK reports gaps — triggers retransmit */
 
     /* Output buffer — caller provides */
     uint8_t* outBuf;
@@ -114,6 +130,12 @@ int sctpSend(sctp_assoc_t* a, uint16_t streamId, uint32_t ppid,
 
 /** Find channel by label. Returns channel index or -1. */
 int sctpFindChannel(sctp_assoc_t* a, const char* label);
+
+/** Process SACK and retransmit missing packets. Call after sctpInput(). */
+int sctpRetransmit(sctp_assoc_t* a, sctp_send_fn sendFn, void* ctx);
+
+/** Free retransmit buffer entries. Call on session teardown. */
+void sctpRexmitFree(sctp_assoc_t* a);
 
 /** CRC32C (used by SCTP). */
 uint32_t crc32c(const uint8_t* data, size_t len);
