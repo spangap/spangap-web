@@ -523,7 +523,13 @@ static void onCameraFrame(const camera_fb_t* fb) {
 static void startStreaming() {
     if (streaming) return;
 
-    int fps = storageGetInt("s.stream.fps", 20);
+    /* Copy stored settings to ephemeral namespace */
+    storageCopy("s.camera.", "camera.");
+    storageCopy("s.audio.", "audio.");
+    storageCopy("s.stream.camera.", "camera.");
+    storageCopy("s.stream.audio.", "audio.");
+
+    int fps = storageGetInt("camera.fps", 20);
     cameraSubscribe(fps, onCameraFrame);
     camSubscribed = true;
 
@@ -531,12 +537,12 @@ static void startStreaming() {
     if (!audSub) audSub = new audio_sub_t{};
     audSub->codec = AUDIO_PCM16;
     audSub->hpf = true;
-    audSub->gain = storageGetInt("s.stream.gain", 1);
-    int agcMax = storageGetInt("s.stream.agc_max", 0);
+    audSub->gain = storageGetInt("audio.gain", 1);
+    int agcMax = storageGetInt("audio.agc_max", 0);
     if (agcMax > 0) {
-        audSub->agc_target = storageGetInt("s.stream.agc_target", 8000);
-        audSub->agc_attack = storageGetInt("s.stream.agc_attack", 10);
-        audSub->agc_release = storageGetInt("s.stream.agc_release", 500);
+        audSub->agc_target = storageGetInt("audio.agc_target", 8000);
+        audSub->agc_attack = storageGetInt("audio.agc_attack", 10);
+        audSub->agc_release = storageGetInt("audio.agc_release", 500);
         audSub->agc_max = agcMax;
     }
     audSub->cb = [](audio_sub_t* sub) {

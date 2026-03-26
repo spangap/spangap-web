@@ -26,7 +26,7 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
-  /** Read a value by dot-notation path (e.g., "s.cam.img.quality"). */
+  /** Read a value by dot-notation path (e.g., "s.camera.img.quality"). */
   function get(path: string): any {
     const parts = path.split('.')
     let obj: any = settings
@@ -38,7 +38,7 @@ export const useDeviceStore = defineStore('device', () => {
   }
 
   /** Build nested object from a dot-notation path and value.
-   *  e.g., ("s.cam.img.quality", 15) → {s:{cam:{img:{quality:15}}}} */
+   *  e.g., ("s.camera.img.quality", 15) → {s:{camera:{img:{quality:15}}}} */
   function buildNested(path: string, val: any): any {
     const parts = path.split('.')
     const root: any = {}
