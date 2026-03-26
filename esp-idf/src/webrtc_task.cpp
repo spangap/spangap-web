@@ -87,18 +87,13 @@ static size_t lastHandshakeLen = 0;
 #define MAX_JPEG_SIZE (200 * 1024)
 static uint8_t* frameBuf = nullptr;   /* PSRAM buffer for JPEG frame copy */
 static bool camSubscribed = false;
-static audio_sub_t* audSub = nullptr;
 static bool streaming = false;
-static uint32_t streamStartMs = 0;    /* millis() at stream start for audio timestamps */
+static uint32_t streamStartMs = 0;
 
-/* Audio bundling: accumulate N×20ms chunks into one 1285-byte DataChannel message.
- * Header: [codec(1)] [timestamp_ms(4)] [data(1280)] */
-#define AUDIO_BUNDLE_DATA  1280
-#define AUDIO_BUNDLE_HDR   5
-#define AUDIO_BUNDLE_SIZE  (AUDIO_BUNDLE_HDR + AUDIO_BUNDLE_DATA)
-static uint8_t audioBundleBuf[AUDIO_BUNDLE_SIZE];
-static size_t  audioBundlePos = AUDIO_BUNDLE_HDR;  /* write position (after header) */
-static uint32_t audioBundleFirstMs = 0;             /* timestamp of first chunk in bundle */
+/* Audio: 5-byte header [codec(1) timestamp(4)] + 1280 bytes encoded data */
+#define DC_AUDIO_DATA  1280
+#define DC_AUDIO_HDR   5
+static uint8_t audioBuf[DC_AUDIO_HDR + DC_AUDIO_DATA];
 
 /* Inactivity timeout: no UDP packets for this long → tear down session */
 static constexpr uint32_t UDP_TIMEOUT_MS = 10000;
@@ -543,45 +538,36 @@ static void startStreaming() {
     cameraSubscribe(fps, onCameraFrame);
     camSubscribed = true;
 
-    /* Audio: configure and subscribe */
-    if (!audSub) audSub = new audio_sub_t{};
-    audSub->codec = AUDIO_PCM16;
-    audSub->hpf = true;
-    audSub->gain = storageGetInt("audio.gain", 1);
+    /* Audio: subscribe with buffer sized for one DC bundle (1280 bytes) */
+    static audio_meta_t audSettings, audSamples;
+    audSettings.buf = audioBuf + DC_AUDIO_HDR;
+    audSettings.len = DC_AUDIO_DATA;
+    audSettings.ms = -1;
+    audSettings.codec = AUDIO_PCM16;
+    audSettings.hpf = true;
+    audSettings.gain = storageGetInt("audio.gain", 1);
     int agcMax = storageGetInt("audio.agc_max", 0);
     if (agcMax > 0) {
-        audSub->agc_target = storageGetInt("audio.agc_target", 8000);
-        audSub->agc_attack = storageGetInt("audio.agc_attack", 10);
-        audSub->agc_release = storageGetInt("audio.agc_release", 500);
-        audSub->agc_max = agcMax;
+        audSettings.agc_target = storageGetInt("audio.agc_target", 8000);
+        audSettings.agc_attack = storageGetInt("audio.agc_attack", 10);
+        audSettings.agc_release = storageGetInt("audio.agc_release", 500);
+        audSettings.agc_max = agcMax;
     }
-    audioBundlePos = AUDIO_BUNDLE_HDR;
-    audioBundleFirstMs = 0;
-    audSub->cb = [](audio_sub_t* sub) {
+    audioSubscribe(&audSettings, &audSamples, []() {
         if (!streaming || !sctp.established) return;
-        if (sub->len == 0 || audioBundlePos + sub->len > AUDIO_BUNDLE_SIZE) return;
-        /* Record timestamp of first chunk in this bundle */
-        if (audioBundlePos == AUDIO_BUNDLE_HDR)
-            audioBundleFirstMs = sub->ms - streamStartMs;
-        memcpy(audioBundleBuf + audioBundlePos, sub->data, sub->len);
-        audioBundlePos += sub->len;
-        /* Send when bundle is full */
-        if (audioBundlePos >= AUDIO_BUNDLE_SIZE) {
-            audioBundleBuf[0] = (uint8_t)sub->codec;
-            audioBundleBuf[1] = (uint8_t)(audioBundleFirstMs >> 24);
-            audioBundleBuf[2] = (uint8_t)(audioBundleFirstMs >> 16);
-            audioBundleBuf[3] = (uint8_t)(audioBundleFirstMs >> 8);
-            audioBundleBuf[4] = (uint8_t)(audioBundleFirstMs);
-            int audCh = sctpFindChannel(&sctp, "audio");
-            if (audCh >= 0) {
-                sctpSend(&sctp, sctp.channels[audCh].streamId,
-                         PPID_BINARY, audioBundleBuf, AUDIO_BUNDLE_SIZE,
-                         dtlsSctpSend, nullptr);
-            }
-            audioBundlePos = AUDIO_BUNDLE_HDR;
+        uint32_t ts = audSamples.timestamp - streamStartMs;
+        audioBuf[0] = (uint8_t)audSamples.codec;
+        audioBuf[1] = (uint8_t)(ts >> 24);
+        audioBuf[2] = (uint8_t)(ts >> 16);
+        audioBuf[3] = (uint8_t)(ts >> 8);
+        audioBuf[4] = (uint8_t)(ts);
+        int audCh = sctpFindChannel(&sctp, "audio");
+        if (audCh >= 0) {
+            sctpSend(&sctp, sctp.channels[audCh].streamId,
+                     PPID_BINARY, audioBuf, DC_AUDIO_HDR + DC_AUDIO_DATA,
+                     dtlsSctpSend, nullptr);
         }
-    };
-    audioSubscribe(audSub);
+    });
 
     pmLockAcquire(webrtcLockLS);
     pmLockAcquire(webrtcLockCPU);
@@ -594,7 +580,7 @@ static void startStreaming() {
 static void stopStreaming() {
     if (!streaming) return;
     if (camSubscribed) { cameraUnsubscribe(); camSubscribed = false; }
-    if (audSub) { audioStop(); }
+    audioStop();
     sctpRexmitFree(&sctp);
     pmLockRelease(webrtcLockCPU);
     pmLockRelease(webrtcLockLS);
@@ -779,12 +765,6 @@ static void webrtcTaskFn(void*) {
             }
         }
 
-        /* Audio: poll ready flag directly — ITS single-message inbox may
-         * drop the audio notification when camera holds the semaphore. */
-        if (audSub && audSub->ready && streaming && sctp.established) {
-            audSub->ready = false;
-            if (audSub->cb) audSub->cb(audSub);
-        }
         if (itsHandle >= 0) {
             char sigBuf[2048];
             size_t n = 0;

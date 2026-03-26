@@ -11,6 +11,7 @@
  */
 #include "webrtc_sctp.h"
 #include "log.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <cstring>
@@ -504,7 +505,7 @@ int sctpSend(sctp_assoc_t* a, uint16_t streamId, uint32_t ppid,
             a->rexmitHead = (slot + 1) % SCTP_REXMIT_SLOTS;
             auto& e = a->rexmit[slot];
             if (e.data) free(e.data);  /* evict oldest */
-            e.data = (uint8_t*)malloc(pos);
+            e.data = (uint8_t*)heap_caps_malloc(pos, MALLOC_CAP_SPIRAM);
             if (e.data) {
                 memcpy(e.data, pkt, pos);
                 e.len = (uint16_t)pos;
