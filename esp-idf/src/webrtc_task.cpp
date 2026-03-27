@@ -128,6 +128,7 @@ static int webrtcBioSend(void* ctx, const unsigned char* buf, size_t len) {
     if (!peerKnown) return MBEDTLS_ERR_SSL_WANT_WRITE;
     int n = sendto(udpFd, buf, len, MSG_DONTWAIT,
                    (struct sockaddr*)&peerAddr, sizeof(peerAddr));
+    if (n > 0) netTrafficOut(n);
     /* Log DTLS record header: type(1) version(2) epoch(2) seq(6) length(2) = 13 bytes */
     if (len >= 13) {
         uint16_t epoch = (buf[3]<<8)|buf[4];
@@ -229,8 +230,9 @@ static void handleStunRequest(const uint8_t* req, size_t reqLen,
     /* Final message length */
     w16(resp + 2, (uint16_t)(pos - 20));
 
-    sendto(udpFd, resp, pos, MSG_DONTWAIT,
-           (const struct sockaddr*)from, sizeof(*from));
+    int sent = sendto(udpFd, resp, pos, MSG_DONTWAIT,
+                      (const struct sockaddr*)from, sizeof(*from));
+    if (sent > 0) netTrafficOut(sent);
 }
 
 /* ---- DTLS setup / teardown ---- */
@@ -761,6 +763,7 @@ static void webrtcTaskFn(void*) {
                 int n = recvfrom(udpFd, rxBuf, sizeof(rxBuf), MSG_DONTWAIT,
                                  (struct sockaddr*)&from, &fromLen);
                 if (n <= 0) break;
+                netTrafficIn(n);
                 handleUdpPacket(rxBuf, n, &from);
             }
         }
