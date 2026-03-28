@@ -366,7 +366,7 @@ static std::string generateSdpAnswer(const char* offerSdp) {
     { char wgAddr[16] = {};
       storageGetStr("s.wg.address", wgAddr, sizeof(wgAddr));
       if (wgAddr[0] && storageGetInt("wg.up", 0)) {
-          strncpy(ips[numIps], wgAddr, sizeof(ips[0]) - 1);
+          safeStrncpy(ips[numIps], wgAddr, sizeof(ips[0]));
           numIps++;
       }
     }
@@ -709,7 +709,7 @@ static void webrtcTaskFn(void*) {
     /* Register /dc WebSocket endpoint with web task */
     { web_path_msg_t reg = {};
       reg.itsPort = 4433;  /* convention: use DC's UDP port */
-      strncpy(reg.path, "webrtc", sizeof(reg.path));
+      safeStrncpy(reg.path, "webrtc", sizeof(reg.path));
       while (!itsSendAux("web", &reg, sizeof(reg), pdMS_TO_TICKS(500)))
           vTaskDelay(pdMS_TO_TICKS(100));
     }
