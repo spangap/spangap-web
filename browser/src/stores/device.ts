@@ -9,7 +9,7 @@ export const useDeviceStore = defineStore('device', () => {
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
   let reconnectDelay = 1000
-  let knownBuildTime = ''
+  let knownFixedMtime: number | null = null
   let lastRx = 0
   let reloading = false
 
@@ -60,20 +60,34 @@ export const useDeviceStore = defineStore('device', () => {
     return `${proto}//${host}:${port}`
   }
 
-  function checkBuildTime() {
-    const bt = settings.sys?.build_time
-    if (!bt) return
-    if (!knownBuildTime) {
-      knownBuildTime = bt
-      console.log('[device] build:', bt)
-    } else if (bt !== knownBuildTime) {
-      console.log('[device] build changed:', knownBuildTime, '→', bt, '— reloading')
-      knownBuildTime = bt
-      reloading = true
-      if (ws) { ws.close(); ws = null }
-      fetch('/', { cache: 'no-store' }).catch(() => {}).finally(() => {
-        setTimeout(() => { window.location.href = window.location.pathname + window.location.search }, 500)
+  function reloadForNewAssets() {
+    reloading = true
+    if (ws) {
+      ws.close()
+      ws = null
+    }
+    fetch('/', { cache: 'no-store' })
+      .catch(() => {})
+      .finally(() => {
+        setTimeout(() => {
+          window.location.href = window.location.pathname + window.location.search
+        }, 500)
       })
+  }
+
+  /** Reload SPA only when LittleFS /fixed web payload changed (not on app-only OTA). */
+  function checkBuildTime() {
+    const fx = settings.sys?.buildtime?.fixed
+    if (typeof fx !== 'number') return
+    if (knownFixedMtime === null) {
+      knownFixedMtime = fx
+      console.log('[device] sys.buildtime.fixed', fx)
+      return
+    }
+    if (fx !== knownFixedMtime) {
+      console.log('[device] fixed image changed:', knownFixedMtime, '→', fx, '— reloading')
+      knownFixedMtime = fx
+      reloadForNewAssets()
     }
   }
 
