@@ -24,6 +24,7 @@
 #define SCTP_SACK           3
 #define SCTP_HEARTBEAT      4
 #define SCTP_HEARTBEAT_ACK  5
+#define SCTP_ABORT          6
 #define SCTP_COOKIE_ECHO    10
 #define SCTP_COOKIE_ACK     11
 #define SCTP_FORWARD_TSN    0xC0

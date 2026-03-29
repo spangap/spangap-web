@@ -18,7 +18,6 @@
 #include "audio.h"
 #include "net.h"
 #include "web.h"
-#include "net.h"
 
 #include "esp_netif.h"
 #include <cstring>
@@ -47,6 +46,83 @@ static inline void w32(uint8_t* p, uint32_t v) { p[0]=v>>24; p[1]=v>>16; p[2]=v>
 
 static const uint16_t SCTP_PORT = 5000;      /* from SDP a=sctp-port */
 static const size_t   SCTP_BUF_SIZE = 2048;  /* outgoing SCTP packet buffer */
+
+/* DTLS record content types (RFC 6347) */
+enum : uint8_t {
+    DTLS_CT_CHANGE_CIPHER_SPEC = 20,
+    DTLS_CT_ALERT            = 21,
+    DTLS_CT_HANDSHAKE        = 22,
+    DTLS_CT_APPLICATION_DATA = 23,
+};
+
+static uint64_t dtlsRecordSeq6(const uint8_t* buf) {
+    return ((uint64_t)buf[5] << 40) | ((uint64_t)buf[6] << 32) |
+           ((uint64_t)buf[7] << 24) | ((uint64_t)buf[8] << 16) |
+           ((uint64_t)buf[9] << 8) | (uint64_t)buf[10];
+}
+
+static const char* dtlsAlertLevelStr(uint8_t level) {
+    switch (level) {
+        case 1: return "warning";
+        case 2: return "fatal";
+        default: return "?";
+    }
+}
+
+static const char* dtlsAlertDescStr(uint8_t d) {
+    switch (d) {
+        case 0: return "close_notify";
+        case 10: return "unexpected_message";
+        case 20: return "bad_record_mac";
+        case 21: return "decryption_failed";
+        case 22: return "record_overflow";
+        case 40: return "handshake_failure";
+        case 42: return "bad_certificate";
+        case 43: return "unsupported_certificate";
+        case 44: return "certificate_revoked";
+        case 45: return "certificate_expired";
+        case 46: return "certificate_unknown";
+        case 47: return "illegal_parameter";
+        case 48: return "unknown_ca";
+        case 49: return "access_denied";
+        case 50: return "decode_error";
+        case 51: return "decrypt_error";
+        case 70: return "protocol_version";
+        case 71: return "insufficient_security";
+        case 80: return "internal_error";
+        case 86: return "inappropriate_fallback";
+        case 90: return "user_canceled";
+        case 100: return "no_renegotiation";
+        case 109: return "missing_extension";
+        case 110: return "unsupported_extension";
+        default: return "?";
+    }
+}
+
+/** Log DTLS Alert (type 21) at record layer. After handshake the fragment is AEAD ciphertext;
+ *  level/description are only visible here if the record is plaintext (2-byte fragment). */
+static void dtlsLogIncomingAlertRecord(const uint8_t* buf, size_t n) {
+    if (n < 13) {
+        dbg("DTLS Alert: truncated header (%d bytes)\n", (int)n);
+        return;
+    }
+    uint16_t epoch = r16(buf + 3);
+    uint64_t seq = dtlsRecordSeq6(buf);
+    uint16_t fragLen = r16(buf + 11);
+    if (fragLen == 2 && n >= 15 && n >= 13u + fragLen) {
+        uint8_t level = buf[13];
+        uint8_t desc = buf[14];
+        dbg("DTLS Alert plaintext: level=%u (%s) description=%u (%s) epoch=%u seq=%llu\n",
+            (unsigned)level, dtlsAlertLevelStr(level),
+            (unsigned)desc, dtlsAlertDescStr(desc),
+            (unsigned)epoch, seq);
+        return;
+    }
+    dbg("DTLS Alert record (wire): ver=%02x%02x epoch=%u seq=%llu ciphertext_len=%u "
+        "(inner level/description encrypted; peer e.g. Chrome still sends this on teardown — "
+        "not exposed to JS)\n",
+        buf[1], buf[2], (unsigned)epoch, seq, (unsigned)fragLen);
+}
 
 /* ---- Task state ---- */
 
@@ -95,8 +171,10 @@ static uint32_t streamStartMs = 0;
 #define DC_AUDIO_HDR   5
 static uint8_t audioBuf[DC_AUDIO_HDR + DC_AUDIO_DATA];
 
-/* Inactivity timeout: no UDP packets for this long → tear down session */
-static constexpr uint32_t UDP_TIMEOUT_MS = 10000;
+/* Inactivity timeout: no UDP to host for this long → tear down session.
+ * Browser→device can go quiet for many seconds (SACK batching / scheduling) while
+ * video still flows device→browser; 10s was too aggressive. */
+static constexpr uint32_t UDP_TIMEOUT_MS = 45000;
 static uint32_t lastUdpRxMs = 0;
 
 /* ITS signaling */
@@ -135,7 +213,7 @@ static int webrtcBioSend(void* ctx, const unsigned char* buf, size_t len) {
         uint64_t seq = ((uint64_t)buf[5]<<40)|((uint64_t)buf[6]<<32)|
                        ((uint64_t)buf[7]<<24)|((uint64_t)buf[8]<<16)|
                        ((uint64_t)buf[9]<<8)|(uint64_t)buf[10];
-        dbg("WebRTC: BIO send %d bytes, DTLS type=%d ver=%02x%02x epoch=%d seq=%llu len=%d\n",
+        verb("BIO send %d bytes, DTLS type=%d ver=%02x%02x epoch=%d seq=%llu len=%d\n",
              (int)len, buf[0], buf[1], buf[2], epoch, seq, (buf[11]<<8)|buf[12]);
     }
     if (n < 0) {
@@ -175,10 +253,10 @@ static void handleStunRequest(const uint8_t* req, size_t reqLen,
     if (reqLen < 20) return;
     uint16_t msgType = r16(req);
     if (msgType != 0x0001) {
-        dbg("WebRTC: STUN non-binding msg type 0x%04x\n", msgType);
+        dbg("STUN non-binding msg type 0x%04x\n", msgType);
         return;
     }
-    dbg("WebRTC: STUN binding request from %s:%d\n",
+    verb("STUN binding request from %s:%d\n",
         inet_ntoa(from->sin_addr), ntohs(from->sin_port));
 
     uint8_t resp[256];
@@ -291,7 +369,7 @@ static void dtlsExportKeys(void *p_expkey,
         pos += snprintf(line + pos, sizeof(line) - pos, " ");
         for (size_t i = 0; i < secret_len; i++)
             pos += snprintf(line + pos, sizeof(line) - pos, "%02x", secret[i]);
-        dbg("WebRTC: KEYLOG %s\n", line);
+        dbg("KEYLOG %s\n", line);
     }
 }
 
@@ -320,10 +398,10 @@ static int dtlsSctpSend(const uint8_t* pkt, size_t len, void* ctx) {
     int ret = mbedtls_ssl_write(&dtls, pkt, len);
     if (ret < 0) {
         if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) return 0;
-        err("WebRTC: DTLS write failed: -0x%04x\n", -ret);
+        err("DTLS write failed: -0x%04x\n", -ret);
         return -1;
     }
-    dbg("WebRTC: DTLS write %d/%d bytes\n", ret, (int)len);
+    verb("DTLS write %d/%d bytes\n", ret, (int)len);
     return ret;
 }
 
@@ -413,10 +491,10 @@ static int webrtcItsConnect(int handle, int itsPort, const void* data, size_t le
     itsHandle = handle;
     webrtcWsClient = false;
     if (len >= sizeof(net_connect_t) && ((const net_connect_t*)data)->ws) {
-        if (!wsUpgrade(handle)) { info("WebRTC: WS upgrade failed\n"); return -1; }
+        if (!wsUpgrade(handle)) { info("WS upgrade failed\n"); return -1; }
         webrtcWsClient = true;
     }
-    info("WebRTC: signaling client connected%s\n", webrtcWsClient ? " (WS)" : "");
+    info("signaling client connected%s\n", webrtcWsClient ? " (WS)" : "");
     return 0;
 }
 
@@ -429,7 +507,7 @@ static bool webrtcItsBusy(int itsPort, const void* data, size_t len) {
 static void webrtcItsDisconnect(int handle) {
     if (handle == itsHandle) itsHandle = -1;
     webrtcWsClient = false;
-    info("WebRTC: signaling client disconnected\n");
+    info("signaling client disconnected\n");
     stopStreaming();
     if (dtlsSessionActive) dtlsSessionFree();
     peerKnown = false;
@@ -470,12 +548,12 @@ static void handleSignalingMsg(const char* msg, size_t len) {
             }
         }
 
-        dbg("WebRTC: received SDP offer (%d bytes)\n", (int)sdpOffer.size());
+        dbg("received SDP offer (%d bytes)\n", (int)sdpOffer.size());
 
         /* Ensure DTLS is ready (may have missed net.up notification if TLS wasn't ready) */
         dtlsSetup();
         if (!dtlsReady) {
-            err("WebRTC: DTLS not ready (TLS cert missing?)\n");
+            err("DTLS not ready (TLS cert missing?)\n");
             return;
         }
 
@@ -492,7 +570,7 @@ static void handleSignalingMsg(const char* msg, size_t len) {
         }
 
         std::string resp = "{\"type\":\"answer\",\"sdp\":\"" + escaped + "\"}";
-        dbg("WebRTC: SDP answer:\n%s\n", answer.c_str());
+        dbg("SDP answer:\n%s\n", answer.c_str());
         if (itsHandle >= 0) {
             if (webrtcWsClient)
                 wsSendText(itsHandle, resp.c_str(), resp.size());
@@ -509,7 +587,7 @@ static void handleSignalingMsg(const char* msg, size_t len) {
         peerKnown = false;
         lastHandshakeLen = 0;
 
-        dbg("WebRTC: sent SDP answer, waiting for ICE+DTLS\n");
+        dbg("sent SDP answer, waiting for ICE+DTLS\n");
     }
 }
 
@@ -530,11 +608,11 @@ static void onCameraFrame(const camera_fb_t* fb) {
 static void startStreaming() {
     if (streaming) return;
 
-    /* Copy stored settings to ephemeral namespace */
-    storageCopy("s.camera.", "camera.");
-    storageCopy("s.audio.", "audio.");
-    storageCopy("s.stream.camera.", "camera.");
-    storageCopy("s.stream.audio.", "audio.");
+    storageCopyNoNotify("s.camera.", "camera.");
+    storageCopyNoNotify("s.audio.", "audio.");
+    storageCopyNoNotify("s.stream.camera.", "camera.");
+    storageCopyNoNotify("s.stream.audio.", "audio.");
+    cameraRequestApplyConfig();
 
     int fps = storageGetInt("camera.fps", 20);
     cameraSubscribe(fps, onCameraFrame);
@@ -576,7 +654,7 @@ static void startStreaming() {
     streaming = true;
     streamStartMs = millis();
     storageSet("webrtc.up", "1");
-    info("WebRTC: streaming started\n");
+    info("streaming started\n");
 }
 
 static void stopStreaming() {
@@ -588,14 +666,14 @@ static void stopStreaming() {
     pmLockRelease(webrtcLockLS);
     streaming = false;
     storageSet("webrtc.up", "0");
-    info("WebRTC: streaming stopped\n");
+    info("streaming stopped\n");
 }
 
 /* ---- UDP socket management ---- */
 
 static void handleUdpPacket(const uint8_t* buf, size_t n,
                             const struct sockaddr_in* from) {
-    dbg("UDP recv %d bytes from %s:%d\n", (int)n,
+    verb("UDP recv %d bytes from %s:%d\n", (int)n,
         inet_ntoa(from->sin_addr), ntohs(from->sin_port));
 
     peerAddr = *from;
@@ -614,9 +692,20 @@ static void handleUdpPacket(const uint8_t* buf, size_t n,
         memcpy(clientId, &from->sin_addr, 4);
         memcpy(clientId + 4, &from->sin_port, 2);
         mbedtls_ssl_set_client_transport_id(&dtls, clientId, 6);
-    } else if (n >= 1 && buf[0] != 23) {
-        dbg("WebRTC: ignoring DTLS record type=%d after handshake\n", buf[0]);
-        return;
+    } else if (n >= 1) {
+        uint8_t ct = buf[0];
+        /* Handshake retransmits after connected confuse mbedtls_ssl_read — drop */
+        if (ct == DTLS_CT_HANDSHAKE) {
+            dbg("DTLS handshake record after connected (%d bytes), skip\n", (int)n);
+            return;
+        }
+        /* Alert (21): must reach mbedtls (close_notify etc.). Fragment is usually encrypted. */
+        if (ct == DTLS_CT_ALERT) {
+            if (n >= 13) dtlsLogIncomingAlertRecord(buf, n);
+        } else if (ct != DTLS_CT_APPLICATION_DATA) {
+            dbg("DTLS record type=%u after connected (%d bytes), skip\n", (unsigned)ct, (int)n);
+            return;
+        }
     }
 
     /* Feed to DTLS */
@@ -625,46 +714,53 @@ static void handleUdpPacket(const uint8_t* buf, size_t n,
 
     if (!dtlsConnected && dtlsSessionActive) {
         if (n == lastHandshakeLen) {
-            dbg("WebRTC: skipping likely retransmit (%d bytes)\n", (int)n);
+            dbg("skipping likely retransmit (%d bytes)\n", (int)n);
             return;
         }
         lastHandshakeLen = n;
-        dbg("WebRTC: DTLS handshake step (%d bytes from %s)\n",
+        dbg("DTLS handshake step (%d bytes from %s)\n",
              (int)n, inet_ntoa(from->sin_addr));
         int ret = mbedtls_ssl_handshake(&dtls);
         if (ret == 0) {
             dtlsConnected = true;
-            info("WebRTC: DTLS connected\n");
+            info("DTLS connected\n");
         } else if (ret == MBEDTLS_ERR_SSL_HELLO_VERIFY_REQUIRED) {
-            dbg("WebRTC: DTLS hello verify required (normal)\n");
+            dbg("DTLS hello verify required (normal)\n");
             mbedtls_ssl_session_reset(&dtls);
         } else if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
                    ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             char errbuf[128];
             mbedtls_strerror(ret, errbuf, sizeof(errbuf));
-            err("WebRTC: DTLS handshake: -0x%04x %s\n", -ret, errbuf);
+            err("DTLS handshake: -0x%04x %s\n", -ret, errbuf);
             mbedtls_ssl_session_reset(&dtls);
         }
     } else {
         uint8_t plainBuf[2048];
         int ret = mbedtls_ssl_read(&dtls, plainBuf, sizeof(plainBuf));
-        dbg("WebRTC: DTLS read: ret=%d\n", ret);
+        verb("DTLS read: ret=%d\n", ret);
         if (ret > 0) {
             size_t outLen = 0;
-            sctpInput(&sctp, plainBuf, ret, &outLen);
-            dbg("WebRTC: SCTP input %d bytes, response %d bytes, channels=%d\n",
-                 ret, (int)outLen, sctp.numChannels);
-            if (outLen > 0) {
-                int wr = dtlsSctpSend(sctp.outBuf, outLen, nullptr);
-                dbg("WebRTC: dtlsSend(%d) = %d\n", (int)outLen, wr);
+            int sctpSt = sctpInput(&sctp, plainBuf, ret, &outLen);
+            if (sctpSt == 1) {
+                info("SCTP aborted by peer\n");
+                stopStreaming();
+                sctpInit(&sctp, sctpBuf, sizeof(sctpBuf), SCTP_PORT);
+                lastUdpRxMs = 0;
+            } else {
+                verb("SCTP input %d bytes, response %d bytes, channels=%d\n",
+                     ret, (int)outLen, sctp.numChannels);
+                if (outLen > 0) {
+                    int wr = dtlsSctpSend(sctp.outBuf, outLen, nullptr);
+                    verb("dtlsSend(%d) = %d\n", (int)outLen, wr);
+                }
+                /* Retransmit any missing packets reported by SACK */
+                sctpRetransmit(&sctp, dtlsSctpSend, nullptr);
+                if (sctp.numChannels > 0 && !streaming)
+                    startStreaming();
             }
-            /* Retransmit any missing packets reported by SACK */
-            sctpRetransmit(&sctp, dtlsSctpSend, nullptr);
-            if (sctp.numChannels > 0 && !streaming)
-                startStreaming();
         } else if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY ||
                    ret == MBEDTLS_ERR_SSL_CONN_EOF) {
-            info("WebRTC: DTLS closed by peer\n");
+            info("DTLS closed by peer\n");
             stopStreaming();
             dtlsSessionFree();
             dtlsSessionInit();
@@ -680,17 +776,17 @@ static void openUdpSocket() {
     if (udpFd >= 0) return;
 
     udpFd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (udpFd < 0) { err("WebRTC: socket: %d\n", errno); return; }
+    if (udpFd < 0) { err("socket: %d\n", errno); return; }
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
     addr.sin_addr.s_addr = INADDR_ANY;
     if (bind(udpFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        err("WebRTC: bind port %d: %d\n", port, errno);
+        err("bind port %d: %d\n", port, errno);
         close(udpFd); udpFd = -1; return;
     }
     fcntl(udpFd, F_SETFL, fcntl(udpFd, F_GETFL, 0) | O_NONBLOCK);
-    info("WebRTC: UDP port %d open\n", port);
+    info("UDP port %d open\n", port);
 }
 
 static void closeUdpSocket() {
@@ -797,7 +893,7 @@ static void webrtcTaskFn(void*) {
 
         /* Inactivity timeout — peer gone without clean close */
         if (streaming && lastUdpRxMs && millis() - lastUdpRxMs > UDP_TIMEOUT_MS) {
-            info("WebRTC: no UDP activity for %us, tearing down\n", (unsigned)(UDP_TIMEOUT_MS / 1000));
+            info("no UDP activity for %us, tearing down\n", (unsigned)(UDP_TIMEOUT_MS / 1000));
             stopStreaming();
             dtlsSessionFree();
             dtlsSessionInit();
@@ -813,7 +909,7 @@ static void webrtcTaskFn(void*) {
             int ret = mbedtls_ssl_handshake(&dtls);
             if (ret == 0) {
                 dtlsConnected = true;
-                info("WebRTC: DTLS connected (timer retry)\n");
+                info("DTLS connected (timer retry)\n");
             }
         }
 

@@ -327,6 +327,7 @@ void sctpInit(sctp_assoc_t* a, uint8_t* outBuf, size_t outBufSize, uint16_t sctp
 int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen) {
     *outLen = 0;
     if (pktLen < 12) return -1;
+    int peerAbort = 0;
 
     /* Skip checksum verification — DTLS provides integrity (RFC 8261).
      * Browser may send CRC32C or zero; either way, DTLS already verified. */
@@ -423,6 +424,15 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
                 *outLen = buildHeartbeatAck(a, chunk, chunkLen, a->outBuf);
                 break;
 
+            case SCTP_ABORT:
+                if (a->established) {
+                    a->established = false;
+                    a->numChannels = 0;
+                    sctpRexmitFree(a);
+                    peerAbort = 1;
+                }
+                break;
+
             case SCTP_FORWARD_TSN:
                 /* Browser may send this — just update our TSN tracking */
                 if (chunkLen >= 8)
@@ -437,7 +447,7 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
         offset += pad4(chunkLen);
     }
 
-    return 0;
+    return peerAbort;
 }
 
 int sctpSend(sctp_assoc_t* a, uint16_t streamId, uint32_t ppid,
