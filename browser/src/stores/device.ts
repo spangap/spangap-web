@@ -9,7 +9,7 @@ export const useDeviceStore = defineStore('device', () => {
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
   let reconnectDelay = 1000
-  let knownFixedMtime: number | null = null
+  let knownAssetId: number | null = null
   let lastRx = 0
   let reloading = false
 
@@ -75,18 +75,24 @@ export const useDeviceStore = defineStore('device', () => {
       })
   }
 
-  /** Reload SPA only when LittleFS /fixed web payload changed (not on app-only OTA). */
+  /** Reload SPA when deployed webroot bytes change — uses CRC32 from build_times (not file mtimes). */
   function checkBuildTime() {
-    const fx = settings.sys?.buildtime?.fixed
-    if (typeof fx !== 'number') return
-    if (knownFixedMtime === null) {
-      knownFixedMtime = fx
-      console.log('[device] sys.buildtime.fixed', fx)
+    const bt = settings.sys?.buildtime
+    if (!bt || typeof bt.fixed !== 'number') return
+    const useWebCrc =
+      Object.prototype.hasOwnProperty.call(bt, 'web') && typeof bt.web === 'number'
+    const id = useWebCrc ? bt.web : bt.fixed
+    if (knownAssetId === null) {
+      knownAssetId = id
+      console.log(
+        '[device] asset id',
+        useWebCrc ? `web crc32=${id}` : `fixed mtime fallback=${id}`,
+      )
       return
     }
-    if (fx !== knownFixedMtime) {
-      console.log('[device] fixed image changed:', knownFixedMtime, '→', fx, '— reloading')
-      knownFixedMtime = fx
+    if (id !== knownAssetId) {
+      console.log('[device] web assets changed:', knownAssetId, '→', id, '— reloading')
+      knownAssetId = id
       reloadForNewAssets()
     }
   }
