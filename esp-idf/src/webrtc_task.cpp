@@ -161,14 +161,16 @@ static size_t lastHandshakeLen = 0;
 
 /* Streaming */
 #define MAX_JPEG_SIZE (200 * 1024)
-static uint8_t* frameBuf = nullptr;   /* PSRAM buffer for JPEG frame copy */
+/* Prepend AVI-style WCLK chunk: "WCLK" + u32 size(8) + u64 epoch-ms (LE). */
+static constexpr size_t WCLK_CHUNK_SIZE = 16;
+static uint8_t* frameBuf = nullptr;   /* PSRAM buffer for WCLK + JPEG frame copy */
 static bool camSubscribed = false;
 static bool streaming = false;
 static uint32_t streamStartMs = 0;
 
-/* Audio: 5-byte header [codec(1) timestamp(4)] + 1280 bytes encoded data */
+/* Audio: WCLK chunk + codec(1) + 1280 bytes encoded data */
 #define DC_AUDIO_DATA  1280
-#define DC_AUDIO_HDR   5
+static constexpr size_t DC_AUDIO_HDR = WCLK_CHUNK_SIZE + 1;
 static uint8_t audioBuf[DC_AUDIO_HDR + DC_AUDIO_DATA];
 
 /* Inactivity timeout: no UDP to host for this long → tear down session.
@@ -596,11 +598,19 @@ static void handleSignalingMsg(const char* msg, size_t len) {
 static void onCameraFrame(const camera_fb_t* fb) {
     if (!streaming || !sctp.established) return;
     size_t copyLen = fb->len < MAX_JPEG_SIZE ? fb->len : MAX_JPEG_SIZE;
-    memcpy(frameBuf, fb->buf, copyLen);
+    /* Prefix frame with WCLK chunk (epoch-ms, LE). */
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    uint64_t wallMs = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
+    memcpy(frameBuf + 0, "WCLK", 4);
+    uint32_t sz = 8;
+    memcpy(frameBuf + 4, &sz, 4);
+    memcpy(frameBuf + 8, &wallMs, 8);
+    memcpy(frameBuf + WCLK_CHUNK_SIZE, fb->buf, copyLen);
     int vidCh = sctpFindChannel(&sctp, "video");
     if (vidCh >= 0) {
         sctpSend(&sctp, sctp.channels[vidCh].streamId,
-                 PPID_BINARY, frameBuf, copyLen,
+                 PPID_BINARY, frameBuf, WCLK_CHUNK_SIZE + copyLen,
                  dtlsSctpSend, nullptr);
     }
 }
@@ -635,12 +645,14 @@ static void startStreaming() {
     }
     audioSubscribe(&audSettings, &audSamples, []() {
         if (!streaming || !sctp.established) return;
-        uint32_t ts = audSamples.timestamp - streamStartMs;
-        audioBuf[0] = (uint8_t)audSamples.codec;
-        audioBuf[1] = (uint8_t)(ts >> 24);
-        audioBuf[2] = (uint8_t)(ts >> 16);
-        audioBuf[3] = (uint8_t)(ts >> 8);
-        audioBuf[4] = (uint8_t)(ts);
+        struct timeval tv;
+        gettimeofday(&tv, nullptr);
+        uint64_t wallMs = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
+        memcpy(audioBuf + 0, "WCLK", 4);
+        uint32_t sz = 8;
+        memcpy(audioBuf + 4, &sz, 4);
+        memcpy(audioBuf + 8, &wallMs, 8);
+        audioBuf[WCLK_CHUNK_SIZE] = (uint8_t)audSamples.codec;
         int audCh = sctpFindChannel(&sctp, "audio");
         if (audCh >= 0) {
             sctpSend(&sctp, sctp.channels[audCh].streamId,
@@ -919,7 +931,7 @@ static void webrtcTaskFn(void*) {
 /* ---- Init ---- */
 
 void webrtcInit() {
-    frameBuf = (uint8_t*)heap_caps_malloc(MAX_JPEG_SIZE, MALLOC_CAP_SPIRAM);
+    frameBuf = (uint8_t*)heap_caps_malloc(MAX_JPEG_SIZE + WCLK_CHUNK_SIZE, MALLOC_CAP_SPIRAM);
     pmLockCreate(PM_NO_LIGHT_SLEEP, "webrtc", &webrtcLockLS);
     pmLockCreate(PM_CPU_FREQ_MAX, "webrtc", &webrtcLockCPU);
     xTaskCreatePinnedToCoreWithCaps(webrtcTaskFn, "webrtc", 12288, nullptr, 2, &webrtcHandle, 0, MALLOC_CAP_SPIRAM);
