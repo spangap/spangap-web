@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { reactive, ref } from 'vue'
+import { deviceWssBase } from '../lib/device-endpoint'
 
 export const useDeviceStore = defineStore('device', () => {
   const settings: Record<string, any> = reactive({})
@@ -12,6 +13,8 @@ export const useDeviceStore = defineStore('device', () => {
   let knownAssetId: number | null = null
   let lastRx = 0
   let reloading = false
+  /** Keys set while WS was down; flushed on reconnect so record.* toggles reach the device. */
+  const pendingSet = new Map<string, string | number>()
 
   /** Deep-merge src into dst (Vue 3 Proxy handles new property reactivity). */
   function deepMerge(dst: any, src: any) {
@@ -52,12 +55,7 @@ export const useDeviceStore = defineStore('device', () => {
   }
 
   function wsUrl() {
-    const loc = window.location
-    const proto = loc.protocol === 'https:' ? 'wss:' : 'ws:'
-    const params = new URLSearchParams(loc.search)
-    const host = params.get('host') || loc.hostname
-    const port = params.get('port') || loc.port || (loc.protocol === 'https:' ? '443' : '80')
-    return `${proto}//${host}:${port}`
+    return deviceWssBase()
   }
 
   function reloadForNewAssets() {
@@ -97,6 +95,19 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
+  function flushPendingSets() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    const entries = [...pendingSet.entries()]
+    for (const [path, val] of entries) {
+      try {
+        ws.send(JSON.stringify(buildNested(path, val)))
+        pendingSet.delete(path)
+      } catch {
+        /* keep in map */
+      }
+    }
+  }
+
   function connect() {
     if (ws) return
     const url = wsUrl()
@@ -113,6 +124,9 @@ export const useDeviceStore = defineStore('device', () => {
       reconnectDelay = 1000
       lastRx = Date.now()
       startHeartbeat()
+      flushPendingSets()
+      /* Full dump may arrive after open; re-flush so toggles like record.* win over stale merge. */
+      setTimeout(() => flushPendingSets(), 300)
     }
 
     ws.onmessage = (ev) => {
@@ -182,9 +196,14 @@ export const useDeviceStore = defineStore('device', () => {
     }
     obj[parts[parts.length - 1]] = val
 
-    /* Send nested JSON to device */
+    pendingSet.set(path, val)
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(buildNested(path, val)))
+      try {
+        ws.send(JSON.stringify(buildNested(path, val)))
+        pendingSet.delete(path)
+      } catch {
+        /* leave in pendingSet */
+      }
     }
   }
 

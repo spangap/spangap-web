@@ -633,7 +633,10 @@ static void startStreaming() {
     audSettings.buf = audioBuf + DC_AUDIO_HDR;
     audSettings.len = DC_AUDIO_DATA;
     audSettings.ms = -1;
-    audSettings.codec = AUDIO_PCM16;
+    { char cbuf[32];
+      storageGetStr("audio.codec", cbuf, sizeof(cbuf), "ulaw16k");
+      audSettings.codec = audioCodecFromConfigString(cbuf);
+    }
     audSettings.hpf = true;
     audSettings.gain = storageGetInt("audio.gain", 1);
     int agcMax = storageGetInt("audio.agc_max", 0);
