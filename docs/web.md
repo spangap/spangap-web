@@ -25,12 +25,14 @@ Static files are stored on the LittleFS partition (1.5MB at 0x670000 in default_
 
 ### Building and flashing
 
-SPIFFS image is built automatically as part of the normal build. Source files go in `data/`.
+The **LittleFS** `fixed` partition image is built automatically as part of `idf.py build` (see root `CMakeLists.txt`). Web assets are deployed to `data/webroot/` via `web-interface/deploy.sh`. Source tree includes `data/factory_state/` and `data/webroot/`.
 
 ```bash
-idf.py build                              # builds spiffs.bin from data/
-idf.py -p /dev/tty.usbmodem2101 flash    # flashes everything including spiffs
+idf.py build                              # builds fixed.bin from data/
+idf.py -p /dev/tty.usbmodem2101 flash    # flashes app + partition table + fixed
 ```
+
+Settings UI behavior for camera/exposure is summarized in [camera-web-ui.md](camera-web-ui.md).
 
 ## Architecture
 
