@@ -1,11 +1,13 @@
 <template>
   <div class="row items-center no-wrap">
-    <div class="col text-caption">{{ label }}</div>
-    <q-toggle
-      :model-value="boolVal"
-      dense color="primary"
-      @update:model-value="onToggle"
-    />
+    <div class="col-4 text-caption">{{ label }}</div>
+    <div class="col">
+      <q-toggle
+        :model-value="boolVal"
+        dense color="primary"
+        @update:model-value="onToggle"
+      />
+    </div>
   </div>
 </template>
 

@@ -16,16 +16,28 @@ export const useDeviceStore = defineStore('device', () => {
   /** Keys set while WS was down; flushed on reconnect so record.* toggles reach the device. */
   const pendingSet = new Map<string, string | number>()
 
-  /** Deep-merge src into dst (Vue 3 Proxy handles new property reactivity). */
+  /** Deep-merge src into dst. `null` means delete (key/subtree). Arrays replace. */
   function deepMerge(dst: any, src: any) {
     for (const key of Object.keys(src)) {
       const val = src[key]
-      if (val && typeof val === 'object' && !Array.isArray(val)) {
-        if (!dst[key] || typeof dst[key] !== 'object') dst[key] = {}
-        deepMerge(dst[key], val)
-      } else {
-        dst[key] = val
+
+      if (val === null) {
+        delete dst[key]
+        continue
       }
+
+      if (Array.isArray(val)) {
+        dst[key] = val
+        continue
+      }
+
+      if (val && typeof val === 'object') {
+        if (!dst[key] || typeof dst[key] !== 'object' || Array.isArray(dst[key])) dst[key] = {}
+        deepMerge(dst[key], val)
+        continue
+      }
+
+      dst[key] = val
     }
   }
 
@@ -216,10 +228,14 @@ export const useDeviceStore = defineStore('device', () => {
 
   connect()
 
-  /* Clean close on page unload — lets server free ITS handle immediately */
+  /* Flush pending settings + clean close on page unload */
   window.addEventListener('beforeunload', () => {
     reloading = true  /* suppress reconnect */
-    if (ws) { ws.close(); ws = null }
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send('{"save":1}')
+      ws.close()
+    }
+    ws = null
   })
 
   return { settings, connected, get, set, save, connect }

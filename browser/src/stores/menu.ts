@@ -1,0 +1,77 @@
+import { defineStore } from 'pinia'
+import { ref, computed, reactive, type Component } from 'vue'
+
+export interface MenuItem {
+  id: string
+  label: string
+  type: 'panel' | 'toggle' | 'submenu'
+  order: number
+  component?: Component        // for type === 'panel'
+  key?: string                 // for type === 'toggle' (device store dotpath)
+  children?: MenuItem[]        // for type === 'submenu'
+}
+
+export interface MenuGroup {
+  id: string
+  label: string
+  order: number
+  items: MenuItem[]
+}
+
+export const useMenuStore = defineStore('menu', () => {
+  const menus = reactive(new Map<string, MenuGroup>())
+  const activePanel = ref<string | null>(null)
+
+  function register(menuId: string, label: string, order: number, items: MenuItem[]) {
+    const existing = menus.get(menuId)
+    if (existing) {
+      existing.items.push(...items)
+      existing.items.sort((a, b) => a.order - b.order)
+    } else {
+      menus.set(menuId, { id: menuId, label, order, items: [...items].sort((a, b) => a.order - b.order) })
+    }
+  }
+
+  const sortedMenus = computed(() =>
+    [...menus.values()].sort((a, b) => a.order - b.order),
+  )
+
+  function togglePanel(id: string) {
+    activePanel.value = activePanel.value === id ? null : id
+  }
+
+  function closePanel() {
+    activePanel.value = null
+  }
+
+  /** Find the component for the active panel by searching all menus (including submenu children). */
+  const activePanelComponent = computed<Component | null>(() => {
+    if (!activePanel.value) return null
+    for (const menu of menus.values()) {
+      for (const item of menu.items) {
+        if (item.id === activePanel.value && item.component) return item.component
+        if (item.children) {
+          const child = item.children.find(c => c.id === activePanel.value)
+          if (child?.component) return child.component
+        }
+      }
+    }
+    return null
+  })
+
+  const activePanelLabel = computed<string>(() => {
+    if (!activePanel.value) return ''
+    for (const menu of menus.values()) {
+      for (const item of menu.items) {
+        if (item.id === activePanel.value) return item.label
+        if (item.children) {
+          const child = item.children.find(c => c.id === activePanel.value)
+          if (child) return child.label
+        }
+      }
+    }
+    return ''
+  })
+
+  return { menus, activePanel, sortedMenus, register, togglePanel, closePanel, activePanelComponent, activePanelLabel }
+})
