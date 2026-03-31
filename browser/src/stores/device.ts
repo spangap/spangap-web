@@ -13,6 +13,7 @@ export const useDeviceStore = defineStore('device', () => {
   let knownAssetId: number | null = null
   let lastRx = 0
   let reloading = false
+  let clientInfoPushed = false
   /** Keys set while WS was down; flushed on reconnect so record.* toggles reach the device. */
   const pendingSet = new Map<string, string | number>()
 
@@ -107,6 +108,78 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
+  const ZONES_URL = 'https://raw.githubusercontent.com/nayarsystems/posix_tz_db/master/zones.json'
+
+  /** After first full dump, push client time + timezone + zones update if needed. */
+  function pushClientInfo() {
+    if (clientInfoPushed) return
+    /* Wait until we have sys.time in the dump (indicates full dump received) */
+    if (!settings.sys?.time) return
+    clientInfoPushed = true
+
+    /* Push epoch time if device doesn't have valid time */
+    const valid = settings.sys?.time?.valid
+    if (valid !== undefined && Number(valid) === 0) {
+      const epoch = Math.floor(Date.now() / 1000)
+      set('sys.time.set', epoch)
+    }
+
+    /* Push browser timezone if not yet configured (IANA name + POSIX lookup) */
+    const tz = settings.s?.ntp?.tz
+    if (tz === undefined || tz === '') {
+      try {
+        const ianaName = Intl.DateTimeFormat().resolvedOptions().timeZone
+        if (ianaName) {
+          set('s.ntp.tz', ianaName)
+          /* Look up POSIX string from zones tree */
+          const parts = ianaName.split('/')
+          let node: any = settings.s?.time?.zones
+          for (const p of parts) {
+            if (!node || typeof node !== 'object') break
+            node = node[p]
+          }
+          if (typeof node === 'string') set('s.ntp.posix', node)
+        }
+      } catch { /* Intl not available */ }
+    }
+
+    /* Update timezone zones from GitHub if stale (>3 months) */
+    updateZonesIfStale()
+  }
+
+  function updateZonesIfStale() {
+    const deviceEtag = String(settings.s?.time?.zones?.updated ?? '')
+
+    /* HEAD request to check ETag without downloading full file */
+    fetch(ZONES_URL, { method: 'HEAD', cache: 'no-cache' })
+      .then(r => {
+        if (!r.ok) return
+        const ghEtag = r.headers.get('ETag') ?? ''
+        if (!ghEtag) return
+        if (deviceEtag === ghEtag) return  /* already current */
+        /* ETag changed — download and push */
+        return fetch(ZONES_URL, { cache: 'no-cache' })
+          .then(r2 => r2.ok ? r2.json() : null)
+          .then(flat => {
+            if (!flat || typeof flat !== 'object') return
+            const nested: Record<string, any> = {}
+            for (const [iana, posix] of Object.entries(flat)) {
+              const parts = iana.split('/')
+              let node = nested
+              for (let i = 0; i < parts.length - 1; i++)
+                node = node[parts[i]] ??= {}
+              node[parts[parts.length - 1]] = posix
+            }
+            nested.updated = ghEtag
+            if (ws && ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ s: { time: { zones: nested } } }))
+              console.log(`[device] timezone zones updated (${Object.keys(flat).length} zones)`)
+            }
+          })
+      })
+      .catch(() => { /* offline — use existing zones */ })
+  }
+
   function flushPendingSets() {
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     const entries = [...pendingSet.entries()]
@@ -135,6 +208,7 @@ export const useDeviceStore = defineStore('device', () => {
       connected.value = true
       reconnectDelay = 1000
       lastRx = Date.now()
+      clientInfoPushed = false
       startHeartbeat()
       flushPendingSets()
       /* Full dump may arrive after open; re-flush so toggles like record.* win over stale merge. */
@@ -149,6 +223,7 @@ export const useDeviceStore = defineStore('device', () => {
         if (json.pong) return
         deepMerge(settings, json)
         checkBuildTime()
+        pushClientInfo()
       } catch {
         /* ignore non-JSON */
       }

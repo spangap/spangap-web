@@ -6,6 +6,11 @@
       :model-value="String(device.get(k) ?? '')"
       dense outlined
       debounce="500"
+      autocomplete="off"
+      autocorrect="off"
+      autocapitalize="off"
+      spellcheck="false"
+      data-form-type="other"
       @update:model-value="onChange"
     />
   </div>

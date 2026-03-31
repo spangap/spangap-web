@@ -36,6 +36,10 @@ export const useMenuStore = defineStore('menu', () => {
     [...menus.values()].sort((a, b) => a.order - b.order),
   )
 
+  function openPanel(id: string) {
+    activePanel.value = id
+  }
+
   function togglePanel(id: string) {
     activePanel.value = activePanel.value === id ? null : id
   }
@@ -73,5 +77,5 @@ export const useMenuStore = defineStore('menu', () => {
     return ''
   })
 
-  return { menus, activePanel, sortedMenus, register, togglePanel, closePanel, activePanelComponent, activePanelLabel }
+  return { menus, activePanel, sortedMenus, register, openPanel, togglePanel, closePanel, activePanelComponent, activePanelLabel }
 })
