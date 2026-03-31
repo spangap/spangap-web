@@ -618,13 +618,10 @@ static void onCameraFrame(const camera_fb_t* fb) {
 static void startStreaming() {
     if (streaming) return;
 
-    storageCopyNoNotify("s.camera.", "camera.");
     storageCopyNoNotify("s.audio.", "audio.");
-    storageCopyNoNotify("s.stream.camera.", "camera.");
     storageCopyNoNotify("s.stream.audio.", "audio.");
-    cameraRequestApplyConfig();
 
-    int fps = storageGetInt("camera.fps", 20);
+    int fps = storageGetInt("s.stream.max_fps", 20);
     cameraSubscribe(fps, onCameraFrame);
     camSubscribed = true;
 
