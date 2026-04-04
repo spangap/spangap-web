@@ -335,7 +335,7 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
     uint16_t srcPort = r16(pkt);
     uint16_t dstPort = r16(pkt + 2);
     uint32_t vTag = r32(pkt + 4);
-    dbg("SCTP hdr: src=%d dst=%d vTag=0x%08x (our port=%d)\n",
+    verb("SCTP hdr: src=%d dst=%d vTag=0x%08x (our port=%d)\n",
         srcPort, dstPort, (unsigned)vTag, a->myPort);
 
     /* Process chunks */
@@ -347,7 +347,7 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
 
         const uint8_t* chunk = pkt + offset;
 
-        dbg("SCTP chunk type=%d len=%d\n", type, chunkLen);
+        verb("SCTP chunk type=%d len=%d\n", type, chunkLen);
 
         switch (type) {
             case SCTP_INIT:
@@ -395,6 +395,11 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
                     a->peerRwnd = r32(chunk + 8);
                     a->sackCumTsn = cumTsn;
                     uint16_t numGaps = r16(chunk + 12);
+                    uint16_t numDups = r16(chunk + 14);
+                    if (numGaps > 0)
+                        verb("SACK cumTsn=%u gaps=%u dups=%u rwnd=%u (our TSN=%u)\n",
+                             (unsigned)cumTsn, numGaps, numDups,
+                             (unsigned)a->peerRwnd, (unsigned)a->myTsn);
                     /* Free acked entries from retransmit buffer */
                     for (int i = 0; i < SCTP_REXMIT_SLOTS; i++) {
                         auto& e = a->rexmit[i];
@@ -421,11 +426,32 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
 
             case SCTP_HEARTBEAT:
                 if (!a->established) break;
+                dbg("SCTP HEARTBEAT received (%u bytes)\n", chunkLen);
                 *outLen = buildHeartbeatAck(a, chunk, chunkLen, a->outBuf);
                 break;
 
             case SCTP_ABORT:
                 if (a->established) {
+                    /* Log error causes if present (RFC 4960 §3.3.7) */
+                    size_t cOff = 4;
+                    while (cOff + 4 <= chunkLen) {
+                        uint16_t causeCode = r16(chunk + cOff);
+                        uint16_t causeLen  = r16(chunk + cOff + 2);
+                        dbg("SCTP ABORT cause=%u len=%u\n", causeCode, causeLen);
+                        if (causeLen > 4 && cOff + causeLen <= chunkLen) {
+                            /* Cause value may contain a reason string */
+                            size_t valLen = causeLen - 4;
+                            char reason[64];
+                            if (valLen >= sizeof(reason)) valLen = sizeof(reason) - 1;
+                            memcpy(reason, chunk + cOff + 4, valLen);
+                            reason[valLen] = '\0';
+                            dbg("SCTP ABORT reason: %s\n", reason);
+                        }
+                        if (causeLen < 4) break;
+                        cOff += pad4(causeLen);
+                    }
+                    if (cOff == 4)
+                        dbg("SCTP ABORT (no cause codes)\n");
                     a->established = false;
                     a->numChannels = 0;
                     sctpRexmitFree(a);
@@ -562,6 +588,8 @@ int sctpRetransmit(sctp_assoc_t* a, sctp_send_fn sendFn, void* ctx) {
         /* Retransmit if below max */
         if (e.rexmitCount < e.maxRexmit) {
             e.rexmitCount++;
+            dbg("rexmit TSN=%u stream=%u attempt=%u/%u\n",
+                 (unsigned)e.tsn, e.streamId, e.rexmitCount, e.maxRexmit);
             sendFn(e.data, e.len, ctx);
             count++;
         } else {

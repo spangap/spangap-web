@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia'
 import { reactive, ref } from 'vue'
-import { deviceWssBase } from '../lib/device-endpoint'
+import { deviceWssBase } from '../lib/epl'
 
 export const useDeviceStore = defineStore('device', () => {
   const settings: Record<string, any> = reactive({})
@@ -68,7 +68,7 @@ export const useDeviceStore = defineStore('device', () => {
   }
 
   function wsUrl() {
-    return deviceWssBase()
+    return deviceWssBase() + '/epl'
   }
 
   function reloadForNewAssets() {
@@ -252,8 +252,11 @@ export const useDeviceStore = defineStore('device', () => {
     stopHeartbeat()
     heartbeatTimer = setInterval(() => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return
-      if (Date.now() - lastRx > 5000) {
-        console.log('[device] heartbeat timeout, reconnecting')
+      /* Send ping first, then check — avoids false timeouts when the
+         interval callback fires slightly late (JS event loop jitter). */
+      ws.send('{"ping":1}')
+      if (Date.now() - lastRx > 10000) {
+        console.log('[epl] heartbeat timeout, reconnecting')
         ws.onclose = null
         ws.onerror = null
         try { ws.close() } catch {}
@@ -262,9 +265,7 @@ export const useDeviceStore = defineStore('device', () => {
         stopHeartbeat()
         reconnectDelay = 1000
         scheduleReconnect()
-        return
       }
-      ws.send('{"ping":1}')
     }, 5000)
   }
 

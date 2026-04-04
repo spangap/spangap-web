@@ -202,13 +202,17 @@ static int webrtcTimerGet(void* ctx) {
 
 /* ---- DTLS BIO callbacks (UDP sendto/recvfrom) ---- */
 
+static uint32_t lastUdpTxMs = 0;    /* last successful UDP send */
+static uint32_t udpTxDrops = 0;     /* sendto failures since last log */
+static uint32_t udpTxDropLogMs = 0; /* last time we logged drops */
+
 /* Send buffer for DTLS output — goes straight to UDP */
 static int webrtcBioSend(void* ctx, const unsigned char* buf, size_t len) {
     (void)ctx;
     if (!peerKnown) return MBEDTLS_ERR_SSL_WANT_WRITE;
     int n = sendto(udpFd, buf, len, MSG_DONTWAIT,
                    (struct sockaddr*)&peerAddr, sizeof(peerAddr));
-    if (n > 0) netTrafficOut(n);
+    if (n > 0) { netTrafficOut(n); lastUdpTxMs = millis(); }
     /* Log DTLS record header: type(1) version(2) epoch(2) seq(6) length(2) = 13 bytes */
     if (len >= 13) {
         uint16_t epoch = (buf[3]<<8)|buf[4];
@@ -219,7 +223,9 @@ static int webrtcBioSend(void* ctx, const unsigned char* buf, size_t len) {
              (int)len, buf[0], buf[1], buf[2], epoch, seq, (buf[11]<<8)|buf[12]);
     }
     if (n < 0) {
+        udpTxDrops++;
         if (errno == EAGAIN || errno == ENOMEM) return MBEDTLS_ERR_SSL_WANT_WRITE;
+        dbg("sendto failed: errno=%d (%s)\n", errno, strerror(errno));
         return MBEDTLS_ERR_SSL_INTERNAL_ERROR;
     }
     return n;
@@ -313,6 +319,7 @@ static void handleStunRequest(const uint8_t* req, size_t reqLen,
     int sent = sendto(udpFd, resp, pos, MSG_DONTWAIT,
                       (const struct sockaddr*)from, sizeof(*from));
     if (sent > 0) netTrafficOut(sent);
+    else dbg("STUN response sendto failed: errno=%d\n", errno);
 }
 
 /* ---- DTLS setup / teardown ---- */
@@ -336,6 +343,12 @@ static void dtlsSetup() {
     if (ret != 0) { err("dtls cert: -0x%04x\n", -ret); return; }
 
     mbedtls_ssl_conf_authmode(&dtlsConf, MBEDTLS_SSL_VERIFY_NONE);
+
+    /* Disable renegotiation — not needed for DataChannel, and mbedTLS has a
+       bug (#687) where the epoch field isn't masked in the record counter
+       comparison, potentially triggering spurious renegotiation that blocks
+       ssl_write after ~65K records (~5-10 min of streaming). */
+    mbedtls_ssl_conf_renegotiation(&dtlsConf, MBEDTLS_SSL_RENEGOTIATION_DISABLED);
 
     /* ChaCha20-Poly1305 only — no heap allocation per record (unlike AES-GCM) */
     static const int ciphersuites[] = {
@@ -400,7 +413,7 @@ static int dtlsSctpSend(const uint8_t* pkt, size_t len, void* ctx) {
     int ret = mbedtls_ssl_write(&dtls, pkt, len);
     if (ret < 0) {
         if (ret == MBEDTLS_ERR_SSL_WANT_WRITE) return 0;
-        err("DTLS write failed: -0x%04x\n", -ret);
+        dbg("DTLS write failed: -0x%04x len=%d\n", -ret, (int)len);
         return -1;
     }
     verb("DTLS write %d/%d bytes\n", ret, (int)len);
@@ -665,6 +678,9 @@ static void startStreaming() {
     pmLockAcquire(webrtcLockCPU);
     streaming = true;
     streamStartMs = millis();
+    lastUdpTxMs = millis();
+    udpTxDrops = 0;
+    udpTxDropLogMs = millis();
     storageSet("webrtc.up", "1");
     info("streaming started\n");
 }
@@ -763,6 +779,8 @@ static void handleUdpPacket(const uint8_t* buf, size_t n,
                      ret, (int)outLen, sctp.numChannels);
                 if (outLen > 0) {
                     int wr = dtlsSctpSend(sctp.outBuf, outLen, nullptr);
+                    if (wr <= 0)
+                        dbg("SCTP response send failed: %d (len=%d)\n", wr, (int)outLen);
                     verb("dtlsSend(%d) = %d\n", (int)outLen, wr);
                 }
                 /* Retransmit any missing packets reported by SACK */
@@ -902,6 +920,19 @@ static void webrtcTaskFn(void*) {
         }
 
         /* UDP packets now arrive via ITS (handleUdpPacket callback) */
+
+        /* Periodic UDP send stats (every 2s when there are drops or stalls) */
+        if (streaming && millis() - udpTxDropLogMs > 2000) {
+            if (udpTxDrops > 0) {
+                dbg("UDP TX: %u drops in last %ums\n",
+                    (unsigned)udpTxDrops, (unsigned)(millis() - udpTxDropLogMs));
+                udpTxDrops = 0;
+            }
+            if (lastUdpTxMs && millis() - lastUdpTxMs > 2000)
+                dbg("TX stall: no UDP send for %ums\n",
+                    (unsigned)(millis() - lastUdpTxMs));
+            udpTxDropLogMs = millis();
+        }
 
         /* Inactivity timeout — peer gone without clean close */
         if (streaming && lastUdpRxMs && millis() - lastUdpRxMs > UDP_TIMEOUT_MS) {
