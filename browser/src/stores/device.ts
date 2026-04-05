@@ -229,10 +229,11 @@ export const useDeviceStore = defineStore('device', () => {
       }
     }
 
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       ws = null
       connected.value = false
       stopHeartbeat()
+      if (ev.code === 4401) return  /* auth failure — don't reconnect */
       scheduleReconnect()
     }
 
@@ -248,30 +249,44 @@ export const useDeviceStore = defineStore('device', () => {
     reconnectDelay = Math.min(reconnectDelay * 2, 15000)
   }
 
+  function forceReconnect() {
+    if (ws) {
+      ws.onclose = null
+      ws.onerror = null
+      try { ws.close() } catch {}
+      ws = null
+    }
+    connected.value = false
+    stopHeartbeat()
+    reconnectDelay = 1000
+    scheduleReconnect()
+  }
+
   function startHeartbeat() {
     stopHeartbeat()
     heartbeatTimer = setInterval(() => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) return
-      /* Send ping first, then check — avoids false timeouts when the
-         interval callback fires slightly late (JS event loop jitter). */
-      ws.send('{"ping":1}')
-      if (Date.now() - lastRx > 10000) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) { forceReconnect(); return }
+      try { ws.send('{"ping":1}') } catch { forceReconnect(); return }
+      if (Date.now() - lastRx > 30000) {
         console.log('[epl] heartbeat timeout, reconnecting')
-        ws.onclose = null
-        ws.onerror = null
-        try { ws.close() } catch {}
-        ws = null
-        connected.value = false
-        stopHeartbeat()
-        reconnectDelay = 1000
-        scheduleReconnect()
+        forceReconnect()
       }
-    }, 5000)
+    }, 10000)
   }
 
   function stopHeartbeat() {
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null }
   }
+
+  /* Phone sleep/wake: check WS health when page becomes visible.
+   * Brief delay lets the browser resume the socket before we judge it dead. */
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !reloading) {
+      setTimeout(() => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) forceReconnect()
+      }, 2000)
+    }
+  })
 
   /** Set a config value by dot-notation path. Sends nested JSON to device. */
   function set(path: string, val: string | number) {
@@ -302,7 +317,7 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
-  connect()
+  /* Do not auto-connect — MainLayout calls connect() after auth check */
 
   /* Flush pending settings + clean close on page unload */
   window.addEventListener('beforeunload', () => {

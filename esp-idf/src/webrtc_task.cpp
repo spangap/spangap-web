@@ -18,6 +18,7 @@
 #include "audio.h"
 #include "net.h"
 #include "web.h"
+#include "auth.h"
 
 #include "esp_netif.h"
 #include <cstring>
@@ -506,7 +507,20 @@ static int webrtcItsConnect(int handle, int itsPort, const void* data, size_t le
     itsHandle = handle;
     webrtcWsClient = false;
     if (len >= sizeof(net_connect_t) && ((const net_connect_t*)data)->ws) {
-        if (!wsUpgrade(handle)) { info("WS upgrade failed\n"); return -1; }
+        /* Read HTTP headers, check auth before upgrading */
+        char hdr[1024];
+        int hdrLen = webGetHeader(handle, hdr, sizeof(hdr));
+        if (hdrLen <= 0) { info("no headers\n"); return -1; }
+        if (!wsUpgrade(handle, hdr, hdrLen)) { info("WS upgrade failed\n"); return -1; }
+        if (authEnabled()) {
+            char cookie[64] = {};
+            webExtractCookie(hdr, hdrLen, "session", cookie, sizeof(cookie));
+            if (authCheck(cookie).empty()) {
+                wsSendClose(handle, 4401);
+                info("WS auth failed\n");
+                return -1;
+            }
+        }
         webrtcWsClient = true;
     }
     info("signaling client connected%s\n", webrtcWsClient ? " (WS)" : "");
