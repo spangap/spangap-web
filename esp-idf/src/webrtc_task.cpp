@@ -162,8 +162,8 @@ static size_t lastHandshakeLen = 0;
 
 /* Streaming */
 #define MAX_JPEG_SIZE (200 * 1024)
-/* Prepend AVI-style WCLK chunk: "WCLK" + u32 size(8) + u64 epoch-ms (LE). */
-static constexpr size_t WCLK_CHUNK_SIZE = 16;
+/* Prepend AVI-style WCLK chunk: "WCLK" + u32(10) + u64(epoch_ms) + i16(utc_offset_min). */
+static constexpr size_t WCLK_CHUNK_SIZE = 18;
 static uint8_t* frameBuf = nullptr;   /* PSRAM buffer for WCLK + JPEG frame copy */
 static bool camSubscribed = false;
 static bool streaming = false;
@@ -630,14 +630,16 @@ static void handleSignalingMsg(const char* msg, size_t len) {
 static void onCameraFrame(const camera_fb_t* fb) {
     if (!streaming || !sctp.established) return;
     size_t copyLen = fb->len < MAX_JPEG_SIZE ? fb->len : MAX_JPEG_SIZE;
-    /* Prefix frame with WCLK chunk (epoch-ms, LE). */
+    /* Prefix frame with WCLK chunk (epoch-ms + utc offset, LE). */
     struct timeval tv;
     gettimeofday(&tv, nullptr);
     uint64_t wallMs = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
+    int16_t utcOff = utcOffsetMinutes(tv.tv_sec);
     memcpy(frameBuf + 0, "WCLK", 4);
-    uint32_t sz = 8;
+    uint32_t sz = 10;
     memcpy(frameBuf + 4, &sz, 4);
     memcpy(frameBuf + 8, &wallMs, 8);
+    memcpy(frameBuf + 16, &utcOff, 2);
     memcpy(frameBuf + WCLK_CHUNK_SIZE, fb->buf, copyLen);
     int vidCh = sctpFindChannel(&sctp, "video");
     if (vidCh >= 0) {
@@ -680,10 +682,12 @@ static void startStreaming() {
         struct timeval tv;
         gettimeofday(&tv, nullptr);
         uint64_t wallMs = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
+        int16_t utcOff = utcOffsetMinutes(tv.tv_sec);
         memcpy(audioBuf + 0, "WCLK", 4);
-        uint32_t sz = 8;
+        uint32_t sz = 10;
         memcpy(audioBuf + 4, &sz, 4);
         memcpy(audioBuf + 8, &wallMs, 8);
+        memcpy(audioBuf + 16, &utcOff, 2);
         audioBuf[WCLK_CHUNK_SIZE] = (uint8_t)audSamples.codec;
         int audCh = sctpFindChannel(&sctp, "audio");
         if (audCh >= 0) {
