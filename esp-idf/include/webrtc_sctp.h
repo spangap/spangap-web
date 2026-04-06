@@ -103,6 +103,9 @@ typedef struct {
     uint32_t sackCumTsn; /* last cumulative TSN acked by peer */
     bool     sackHasGaps; /* set when SACK reports gaps — triggers retransmit */
 
+    /* FORWARD-TSN: advance peer's cumulative TSN past abandoned data */
+    uint32_t fwdTsnSent;  /* last FORWARD-TSN value we sent (0 = none yet) */
+
     /* Output buffer — caller provides */
     uint8_t* outBuf;
     size_t   outBufSize;
@@ -137,6 +140,11 @@ int sctpRetransmit(sctp_assoc_t* a, sctp_send_fn sendFn, void* ctx);
 
 /** Free retransmit buffer entries. Call on session teardown. */
 void sctpRexmitFree(sctp_assoc_t* a);
+
+/** Build a FORWARD-TSN chunk to advance peer past abandoned TSNs.
+ *  newCumTsn: advance peer's cumulative TSN to this value.
+ *  Returns packet in a->outBuf, length in *outLen. */
+void sctpBuildForwardTsn(sctp_assoc_t* a, uint32_t newCumTsn, size_t* outLen);
 
 /** CRC32C (used by SCTP). */
 uint32_t crc32c(const uint8_t* data, size_t len);

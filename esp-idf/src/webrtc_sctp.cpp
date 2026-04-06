@@ -179,7 +179,9 @@ static size_t buildInitAck(sctp_assoc_t* a, const uint8_t* initChunk, size_t ini
     memcpy(out + pos, &cookie, sizeof(cookie));
     pos += pad4(sizeof(cookie));
 
-    /* No optional parameters — absolute minimum INIT-ACK */
+    /* Forward-TSN-Supported parameter (0xC000) — required for PR-SCTP (RFC 3758) */
+    w16(out + pos, 0xC000); pos += 2;  /* param type */
+    w16(out + pos, 4); pos += 2;       /* param length (header only, no value) */
 
     /* Patch chunk length */
     w16(out + chunkStart + 2, (uint16_t)(pos - chunkStart));
@@ -225,6 +227,21 @@ static size_t buildHeartbeatAck(sctp_assoc_t* a, const uint8_t* hbChunk, size_t 
     out[pos] = SCTP_HEARTBEAT_ACK;
     memcpy(out + pos + 1, hbChunk + 1, hbLen - 1);
     pos += pad4(hbLen);
+    sctpSetChecksum(out, pos);
+    return pos;
+}
+
+/* ---- FORWARD-TSN (RFC 3758) ---- */
+
+static size_t buildForwardTsn(sctp_assoc_t* a, uint32_t newCumTsn, uint8_t* out) {
+    size_t pos = writeHeader(out, a->myPort, a->peerPort, a->peerTag);
+    size_t chunkStart = pos;
+    out[pos++] = SCTP_FORWARD_TSN;
+    out[pos++] = 0;
+    pos += 2; /* length placeholder */
+    w32(out + pos, newCumTsn); pos += 4;
+    /* No per-stream info needed — all our channels are unordered (SSN=0) */
+    w16(out + chunkStart + 2, (uint16_t)(pos - chunkStart));
     sctpSetChecksum(out, pos);
     return pos;
 }
@@ -598,6 +615,11 @@ int sctpRetransmit(sctp_assoc_t* a, sctp_send_fn sendFn, void* ctx) {
         }
     }
     return count;
+}
+
+void sctpBuildForwardTsn(sctp_assoc_t* a, uint32_t newCumTsn, size_t* outLen) {
+    *outLen = buildForwardTsn(a, newCumTsn, a->outBuf);
+    a->fwdTsnSent = newCumTsn;
 }
 
 void sctpRexmitFree(sctp_assoc_t* a) {

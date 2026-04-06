@@ -1,15 +1,15 @@
 import { defineStore } from 'pinia'
 import { reactive, ref } from 'vue'
 import { deviceWssBase } from '../lib/epl'
+import { ReconnectTimer } from '../lib/reconnect'
 
 export const useDeviceStore = defineStore('device', () => {
   const settings: Record<string, any> = reactive({})
   const connected = ref(false)
 
   let ws: WebSocket | null = null
-  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  const reconnect = new ReconnectTimer()
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
-  let reconnectDelay = 1000
   let knownAssetId: number | null = null
   let lastRx = 0
   let reloading = false
@@ -206,7 +206,7 @@ export const useDeviceStore = defineStore('device', () => {
 
     ws.onopen = () => {
       connected.value = true
-      reconnectDelay = 1000
+      reconnect.reset()
       lastRx = Date.now()
       clientInfoPushed = false
       startHeartbeat()
@@ -241,12 +241,8 @@ export const useDeviceStore = defineStore('device', () => {
   }
 
   function scheduleReconnect() {
-    if (reconnectTimer || reloading) return
-    reconnectTimer = setTimeout(() => {
-      reconnectTimer = null
-      connect()
-    }, reconnectDelay)
-    reconnectDelay = Math.min(reconnectDelay * 2, 15000)
+    if (reloading) return
+    reconnect.schedule(() => connect())
   }
 
   function forceReconnect() {
@@ -258,7 +254,7 @@ export const useDeviceStore = defineStore('device', () => {
     }
     connected.value = false
     stopHeartbeat()
-    reconnectDelay = 1000
+    reconnect.reset()
     scheduleReconnect()
   }
 

@@ -169,6 +169,11 @@ static bool camSubscribed = false;
 static bool streaming = false;
 static uint32_t streamStartMs = 0;
 
+/* FORWARD-TSN: remember TSN from ~1s ago so we can advance past abandoned data
+   without killing audio retransmits still in flight. */
+static uint32_t fwdTsnPrev = 0;      /* TSN snapshot from previous cycle */
+static uint32_t fwdTsnPrevMs = 0;    /* when that snapshot was taken */
+
 /* Audio: WCLK chunk + codec(1) + 1280 bytes encoded data */
 #define DC_AUDIO_DATA  1280
 static constexpr size_t DC_AUDIO_HDR = WCLK_CHUNK_SIZE + 1;
@@ -695,6 +700,8 @@ static void startStreaming() {
     lastUdpTxMs = millis();
     udpTxDrops = 0;
     udpTxDropLogMs = millis();
+    fwdTsnPrev = 0;
+    fwdTsnPrevMs = millis();
     storageSet("webrtc.up", "1");
     info("streaming started\n");
 }
@@ -799,6 +806,16 @@ static void handleUdpPacket(const uint8_t* buf, size_t n,
                 }
                 /* Retransmit any missing packets reported by SACK */
                 sctpRetransmit(&sctp, dtlsSctpSend, nullptr);
+                /* FORWARD-TSN: advance peer past abandoned unreliable TSNs.
+                   Use the TSN from ~1s ago so audio retransmits can complete. */
+                if (streaming && sctp.sackHasGaps && fwdTsnPrev > 0) {
+                    int32_t ahead = (int32_t)(fwdTsnPrev - sctp.sackCumTsn);
+                    if (ahead > 0) {
+                        size_t fwdLen = 0;
+                        sctpBuildForwardTsn(&sctp, fwdTsnPrev, &fwdLen);
+                        if (fwdLen > 0) dtlsSctpSend(sctp.outBuf, fwdLen, nullptr);
+                    }
+                }
                 if (sctp.numChannels > 0 && !streaming)
                     startStreaming();
             }
@@ -934,6 +951,12 @@ static void webrtcTaskFn(void*) {
         }
 
         /* UDP packets now arrive via ITS (handleUdpPacket callback) */
+
+        /* FORWARD-TSN: snapshot current TSN every second for the 1s-delayed advance */
+        if (streaming && millis() - fwdTsnPrevMs >= 1000) {
+            fwdTsnPrev = sctp.myTsn > 0 ? sctp.myTsn - 1 : 0;
+            fwdTsnPrevMs = millis();
+        }
 
         /* Periodic UDP send stats (every 2s when there are drops or stalls) */
         if (streaming && millis() - udpTxDropLogMs > 2000) {
