@@ -19,6 +19,7 @@
 #include "net.h"
 #include "web.h"
 #include "auth.h"
+#include "play.h"
 
 #include "esp_netif.h"
 #include <cstring>
@@ -166,6 +167,8 @@ static size_t lastHandshakeLen = 0;
 static constexpr size_t WCLK_CHUNK_SIZE = 18;
 static uint8_t* frameBuf = nullptr;   /* PSRAM buffer for WCLK + JPEG frame copy */
 static bool camSubscribed = false;
+static bool playSubscribed = false;
+static bool playbackMode = false;      /* true = frames from play task, false = from camera */
 static bool streaming = false;
 static uint32_t streamStartMs = 0;
 
@@ -631,10 +634,17 @@ static void onCameraFrame(const camera_fb_t* fb) {
     if (!streaming || !sctp.established) return;
     size_t copyLen = fb->len < MAX_JPEG_SIZE ? fb->len : MAX_JPEG_SIZE;
     /* Prefix frame with WCLK chunk (epoch-ms + utc offset, LE). */
-    struct timeval tv;
-    gettimeofday(&tv, nullptr);
-    uint64_t wallMs = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
-    int16_t utcOff = utcOffsetMinutes(tv.tv_sec);
+    uint64_t wallMs;
+    int16_t utcOff;
+    if (playbackMode) {
+        wallMs = playFrameEpochMs();
+        utcOff = playFrameUtcOffset();
+    } else {
+        struct timeval tv;
+        gettimeofday(&tv, nullptr);
+        wallMs = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
+        utcOff = utcOffsetMinutes(tv.tv_sec);
+    }
     memcpy(frameBuf + 0, "WCLK", 4);
     uint32_t sz = 10;
     memcpy(frameBuf + 4, &sz, 4);
@@ -656,46 +666,73 @@ static void startStreaming() {
     storageCopyNoNotify("s.stream.audio.", "audio.");
 
     int fps = storageGetInt("s.stream.max_fps", 20);
-    cameraSubscribe(fps, onCameraFrame);
-    camSubscribed = true;
+    if (playbackMode) {
+        playSubscribeVideo(fps, onCameraFrame);
+        playSubscribed = true;
+    } else {
+        cameraSubscribe(fps, onCameraFrame);
+        camSubscribed = true;
+    }
 
     /* Audio: subscribe with buffer sized for one DC bundle (1280 bytes) */
     static audio_meta_t audSettings, audSamples;
-    audSettings.buf = audioBuf + DC_AUDIO_HDR;
-    audSettings.len = DC_AUDIO_DATA;
-    audSettings.ms = -1;
-    { char cbuf[32];
-      storageGetStr("audio.codec", cbuf, sizeof(cbuf), "ulaw16k");
-      audSettings.codec = audioCodecFromConfigString(cbuf);
-    }
-    audSettings.hpf = true;
-    audSettings.gain = storageGetInt("audio.gain", 1);
-    int agcMax = storageGetInt("audio.agc_max", 0);
-    if (agcMax > 0) {
-        audSettings.agc_target = storageGetInt("audio.agc_target", 8000);
-        audSettings.agc_attack = storageGetInt("audio.agc_attack", 10);
-        audSettings.agc_release = storageGetInt("audio.agc_release", 500);
-        audSettings.agc_max = agcMax;
-    }
-    audioSubscribe(&audSettings, &audSamples, []() {
+
+    /* Audio callback — shared between live and playback */
+    static auto onAudioChunk = []() {
         if (!streaming || !sctp.established) return;
-        struct timeval tv;
-        gettimeofday(&tv, nullptr);
-        uint64_t wallMs = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
-        int16_t utcOff = utcOffsetMinutes(tv.tv_sec);
+        uint64_t wallMs;
+        int16_t utcOff;
+        if (playbackMode) {
+            wallMs = playFrameEpochMs();
+            utcOff = playFrameUtcOffset();
+        } else {
+            struct timeval tv;
+            gettimeofday(&tv, nullptr);
+            wallMs = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
+            utcOff = utcOffsetMinutes(tv.tv_sec);
+        }
         memcpy(audioBuf + 0, "WCLK", 4);
         uint32_t sz = 10;
         memcpy(audioBuf + 4, &sz, 4);
         memcpy(audioBuf + 8, &wallMs, 8);
         memcpy(audioBuf + 16, &utcOff, 2);
+        /* Playback: audio data is in audSamples.buf (play task's buffer), copy into send buffer */
+        size_t audLen = DC_AUDIO_DATA;
+        if (playbackMode && audSamples.buf && audSamples.len > 0) {
+            audLen = (size_t)audSamples.len < DC_AUDIO_DATA ? (size_t)audSamples.len : DC_AUDIO_DATA;
+            memcpy(audioBuf + DC_AUDIO_HDR, audSamples.buf, audLen);
+        }
         audioBuf[WCLK_CHUNK_SIZE] = (uint8_t)audSamples.codec;
         int audCh = sctpFindChannel(&sctp, "audio");
         if (audCh >= 0) {
             sctpSend(&sctp, sctp.channels[audCh].streamId,
-                     PPID_BINARY, audioBuf, DC_AUDIO_HDR + DC_AUDIO_DATA,
+                     PPID_BINARY, audioBuf, DC_AUDIO_HDR + audLen,
                      dtlsSctpSend, nullptr);
         }
-    });
+    };
+
+    audSettings.buf = audioBuf + DC_AUDIO_HDR;
+    audSettings.len = DC_AUDIO_DATA;
+    audSettings.ms = -1;
+
+    if (playbackMode) {
+        playSubscribeAudio(&audSamples, onAudioChunk);
+    } else {
+        { char cbuf[32];
+          storageGetStr("audio.codec", cbuf, sizeof(cbuf), "ulaw16k");
+          audSettings.codec = audioCodecFromConfigString(cbuf);
+        }
+        audSettings.hpf = true;
+        audSettings.gain = storageGetInt("audio.gain", 1);
+        int agcMax = storageGetInt("audio.agc_max", 0);
+        if (agcMax > 0) {
+            audSettings.agc_target = storageGetInt("audio.agc_target", 8000);
+            audSettings.agc_attack = storageGetInt("audio.agc_attack", 10);
+            audSettings.agc_release = storageGetInt("audio.agc_release", 500);
+            audSettings.agc_max = agcMax;
+        }
+        audioSubscribe(&audSettings, &audSamples, onAudioChunk);
+    }
 
     pmLockAcquire(webrtcLockLS);
     pmLockAcquire(webrtcLockCPU);
@@ -713,7 +750,8 @@ static void startStreaming() {
 static void stopStreaming() {
     if (!streaming) return;
     if (camSubscribed) { cameraUnsubscribe(); camSubscribed = false; }
-    audioStop();
+    if (playSubscribed) { playUnsubscribeVideo(); playUnsubscribeAudio(); playSubscribed = false; }
+    if (!playbackMode) audioStop();
     sctpRexmitFree(&sctp);
     pmLockRelease(webrtcLockCPU);
     pmLockRelease(webrtcLockLS);
@@ -883,6 +921,18 @@ static void webrtcTaskFn(void*) {
         peerKnown = false;
         openUdpSocket();
     });
+    /* play.source switching — swap frame/audio sources while keeping DTLS/SCTP alive */
+    storageSubscribeChanges("play.source", ON_CHANGE {
+        bool wantPlayback = val && val[0] && strcmp(val, "live") != 0;
+        if (wantPlayback != playbackMode) {
+            bool wasStreaming = streaming;
+            if (wasStreaming) stopStreaming();
+            playbackMode = wantPlayback;
+            if (wasStreaming) startStreaming();
+            info("source: %s\n", playbackMode ? "playback" : "live");
+        }
+    });
+
     storageSubscribeChanges("net.up", ON_CHANGE {
         if (atoi(val)) {
             dtlsSetup();

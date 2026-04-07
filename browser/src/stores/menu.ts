@@ -4,11 +4,12 @@ import { ref, computed, reactive, type Component } from 'vue'
 export interface MenuItem {
   id: string
   label: string
-  type: 'panel' | 'toggle' | 'submenu'
+  type: 'panel' | 'toggle' | 'submenu' | 'action'
   order: number
   component?: Component        // for type === 'panel'
   key?: string                 // for type === 'toggle' (device store dotpath)
   children?: MenuItem[]        // for type === 'submenu'
+  action?: () => void          // for type === 'action'
 }
 
 export interface MenuGroup {
