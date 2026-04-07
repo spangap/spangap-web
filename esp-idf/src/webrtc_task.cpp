@@ -182,6 +182,10 @@ static uint32_t fwdTsnPrevMs = 0;    /* when that snapshot was taken */
 static constexpr size_t DC_AUDIO_HDR = WCLK_CHUNK_SIZE + 1;
 static uint8_t audioBuf[DC_AUDIO_HDR + DC_AUDIO_DATA];
 
+/* Playback audio: larger buffer for full AVI chunks (up to 8KB) */
+#define PLAY_AUDIO_SEND_MAX  8192
+static uint8_t* playAudioSendBuf = nullptr; /* PSRAM, allocated in webrtcInit */
+
 /* Inactivity timeout: no UDP to host for this long → tear down session.
  * Browser→device can go quiet for many seconds (SACK batching / scheduling) while
  * video still flows device→browser; 10s was too aggressive. */
@@ -691,22 +695,24 @@ static void startStreaming() {
             wallMs = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
             utcOff = utcOffsetMinutes(tv.tv_sec);
         }
-        memcpy(audioBuf + 0, "WCLK", 4);
-        uint32_t sz = 10;
-        memcpy(audioBuf + 4, &sz, 4);
-        memcpy(audioBuf + 8, &wallMs, 8);
-        memcpy(audioBuf + 16, &utcOff, 2);
-        /* Playback: audio data is in audSamples.buf (play task's buffer), copy into send buffer */
+        /* Pick send buffer: playback uses larger PSRAM buffer for full AVI chunks */
+        uint8_t* aBuf = audioBuf;
         size_t audLen = DC_AUDIO_DATA;
-        if (playbackMode && audSamples.buf && audSamples.len > 0) {
-            audLen = (size_t)audSamples.len < DC_AUDIO_DATA ? (size_t)audSamples.len : DC_AUDIO_DATA;
-            memcpy(audioBuf + DC_AUDIO_HDR, audSamples.buf, audLen);
+        if (playbackMode && audSamples.buf && audSamples.len > 0 && playAudioSendBuf) {
+            aBuf = playAudioSendBuf;
+            audLen = (size_t)audSamples.len < PLAY_AUDIO_SEND_MAX ? (size_t)audSamples.len : PLAY_AUDIO_SEND_MAX;
+            memcpy(aBuf + DC_AUDIO_HDR, audSamples.buf, audLen);
         }
-        audioBuf[WCLK_CHUNK_SIZE] = (uint8_t)audSamples.codec;
+        memcpy(aBuf + 0, "WCLK", 4);
+        uint32_t sz = 10;
+        memcpy(aBuf + 4, &sz, 4);
+        memcpy(aBuf + 8, &wallMs, 8);
+        memcpy(aBuf + 16, &utcOff, 2);
+        aBuf[WCLK_CHUNK_SIZE] = (uint8_t)audSamples.codec;
         int audCh = sctpFindChannel(&sctp, "audio");
         if (audCh >= 0) {
             sctpSend(&sctp, sctp.channels[audCh].streamId,
-                     PPID_BINARY, audioBuf, DC_AUDIO_HDR + audLen,
+                     PPID_BINARY, aBuf, DC_AUDIO_HDR + audLen,
                      dtlsSctpSend, nullptr);
         }
     };
@@ -1054,6 +1060,7 @@ static void webrtcTaskFn(void*) {
 
 void webrtcInit() {
     frameBuf = (uint8_t*)heap_caps_malloc(MAX_JPEG_SIZE + WCLK_CHUNK_SIZE, MALLOC_CAP_SPIRAM);
+    playAudioSendBuf = (uint8_t*)heap_caps_malloc(DC_AUDIO_HDR + PLAY_AUDIO_SEND_MAX, MALLOC_CAP_SPIRAM);
     pmLockCreate(PM_NO_LIGHT_SLEEP, "webrtc", &webrtcLockLS);
     pmLockCreate(PM_CPU_FREQ_MAX, "webrtc", &webrtcLockCPU);
     xTaskCreatePinnedToCoreWithCaps(webrtcTaskFn, "webrtc", 12288, nullptr, 2, &webrtcHandle, 0, MALLOC_CAP_SPIRAM);
