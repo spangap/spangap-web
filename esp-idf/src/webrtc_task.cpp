@@ -186,6 +186,12 @@ static uint8_t audioBuf[DC_AUDIO_HDR + DC_AUDIO_DATA];
 #define PLAY_AUDIO_SEND_MAX  8192
 static uint8_t* playAudioSendBuf = nullptr; /* PSRAM, allocated in webrtcInit */
 
+/* Deferred send: handlers copy data and return immediately so ITS_WAIT_PICKUP
+ * unblocks the sender (play/camera task) without waiting for DTLS+SCTP+UDP. */
+static size_t pendingVideoLen = 0;
+static size_t pendingAudioLen = 0;
+static uint8_t* pendingAudioBuf = nullptr;  /* points to audioBuf or playAudioSendBuf */
+
 /* Inactivity timeout: no UDP to host for this long → tear down session.
  * Browser→device can go quiet for many seconds (SACK batching / scheduling) while
  * video still flows device→browser; 10s was too aggressive. */
@@ -655,12 +661,8 @@ static void onCameraFrame(const camera_fb_t* fb) {
     memcpy(frameBuf + 8, &wallMs, 8);
     memcpy(frameBuf + 16, &utcOff, 2);
     memcpy(frameBuf + WCLK_CHUNK_SIZE, fb->buf, copyLen);
-    int vidCh = sctpFindChannel(&sctp, "video");
-    if (vidCh >= 0) {
-        sctpSend(&sctp, sctp.channels[vidCh].streamId,
-                 PPID_BINARY, frameBuf, WCLK_CHUNK_SIZE + copyLen,
-                 dtlsSctpSend, nullptr);
-    }
+    /* Deferred: copy done, sctpSend happens in main loop */
+    pendingVideoLen = WCLK_CHUNK_SIZE + copyLen;
 }
 
 static void startStreaming() {
@@ -681,7 +683,8 @@ static void startStreaming() {
     /* Audio: subscribe with buffer sized for one DC bundle (1280 bytes) */
     static audio_meta_t audSettings, audSamples;
 
-    /* Audio callback — shared between live and playback */
+    /* Audio callback — shared between live and playback.
+     * Copies data and returns immediately (deferred send in main loop). */
     static auto onAudioChunk = []() {
         if (!streaming || !sctp.established) return;
         uint64_t wallMs;
@@ -709,12 +712,9 @@ static void startStreaming() {
         memcpy(aBuf + 8, &wallMs, 8);
         memcpy(aBuf + 16, &utcOff, 2);
         aBuf[WCLK_CHUNK_SIZE] = (uint8_t)audSamples.codec;
-        int audCh = sctpFindChannel(&sctp, "audio");
-        if (audCh >= 0) {
-            sctpSend(&sctp, sctp.channels[audCh].streamId,
-                     PPID_BINARY, aBuf, DC_AUDIO_HDR + audLen,
-                     dtlsSctpSend, nullptr);
-        }
+        /* Deferred: copy done, sctpSend happens in main loop */
+        pendingAudioLen = DC_AUDIO_HDR + audLen;
+        pendingAudioBuf = aBuf;
     };
 
     audSettings.buf = audioBuf + DC_AUDIO_HDR;
@@ -758,6 +758,9 @@ static void stopStreaming() {
     if (camSubscribed) { cameraUnsubscribe(); camSubscribed = false; }
     if (playSubscribed) { playUnsubscribeVideo(); playUnsubscribeAudio(); playSubscribed = false; }
     if (!playbackMode) audioStop();
+    pendingVideoLen = 0;
+    pendingAudioLen = 0;
+    pendingAudioBuf = nullptr;
     sctpRexmitFree(&sctp);
     pmLockRelease(webrtcLockCPU);
     pmLockRelease(webrtcLockLS);
@@ -967,8 +970,29 @@ static void webrtcTaskFn(void*) {
     }
 
     for (;;) {
-        /* ITS messages (camera/audio/signaling) + 1ms timeout for UDP poll */
-        while (itsPoll(udpFd >= 0 ? 1 : portMAX_DELAY)) {}
+        /* ITS messages (camera/audio/signaling) + deferred SCTP sends.
+         * Handlers just copy data; sctpSend runs here after each pickup
+         * so the sender is unblocked early but no frames are lost. */
+        for (;;) {
+            if (!itsPoll(udpFd >= 0 ? 1 : portMAX_DELAY)) break;
+            if (pendingVideoLen > 0) {
+                int vidCh = sctpFindChannel(&sctp, "video");
+                if (vidCh >= 0)
+                    sctpSend(&sctp, sctp.channels[vidCh].streamId,
+                             PPID_BINARY, frameBuf, pendingVideoLen,
+                             dtlsSctpSend, nullptr);
+                pendingVideoLen = 0;
+            }
+            if (pendingAudioLen > 0 && pendingAudioBuf) {
+                int audCh = sctpFindChannel(&sctp, "audio");
+                if (audCh >= 0)
+                    sctpSend(&sctp, sctp.channels[audCh].streamId,
+                             PPID_BINARY, pendingAudioBuf, pendingAudioLen,
+                             dtlsSctpSend, nullptr);
+                pendingAudioLen = 0;
+                pendingAudioBuf = nullptr;
+            }
+        }
 
         /* Drain UDP socket */
         if (udpFd >= 0) {
