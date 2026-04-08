@@ -17,19 +17,22 @@ export interface MenuGroup {
   label: string
   order: number
   items: MenuItem[]
+  activeLabel?: string      // label shown in menu bar when this panel is active
+  onClose?: () => void      // called when active panel's menu button is clicked (to dismiss)
 }
 
 export const useMenuStore = defineStore('menu', () => {
   const menus = reactive(new Map<string, MenuGroup>())
   const activePanel = ref<string | null>(null)
 
-  function register(menuId: string, label: string, order: number, items: MenuItem[]) {
+  function register(menuId: string, label: string, order: number, items: MenuItem[], options?: { activeLabel?: string, onClose?: () => void }) {
     const existing = menus.get(menuId)
     if (existing) {
       existing.items.push(...items)
       existing.items.sort((a, b) => a.order - b.order)
+      if (options) Object.assign(existing, options)
     } else {
-      menus.set(menuId, { id: menuId, label, order, items: [...items].sort((a, b) => a.order - b.order) })
+      menus.set(menuId, { id: menuId, label, order, items: [...items].sort((a, b) => a.order - b.order), ...options })
     }
   }
 
