@@ -519,8 +519,8 @@ static std::string generateSdpAnswer(const char* offerSdp) {
 static void stopStreaming();
 static bool webrtcWsClient = false;
 
-static int webrtcItsConnect(int handle, int itsPort, const void* data, size_t len) {
-    if (itsHandle >= 0) itsServerKick(itsHandle);
+static int webrtcItsConnect(int handle, const void* data, size_t len) {
+    if (itsHandle >= 0) itsDisconnect(itsHandle);
     itsHandle = handle;
     webrtcWsClient = false;
     if (len >= sizeof(net_connect_t) && ((const net_connect_t*)data)->ws) {
@@ -544,14 +544,15 @@ static int webrtcItsConnect(int handle, int itsPort, const void* data, size_t le
     return 0;
 }
 
-static bool webrtcItsBusy(int itsPort, const void* data, size_t len) {
+static bool webrtcItsBusy(const void* data, size_t len) {
     /* Kick existing client */
-    if (itsHandle >= 0) itsServerKick(itsHandle);
+    if (itsHandle >= 0) itsDisconnect(itsHandle);
     return false; /* retry with freed slot */
 }
 
-static void webrtcItsDisconnect(int handle) {
-    if (handle == itsHandle) itsHandle = -1;
+static void webrtcItsDisconnect(int ref) {
+    /* Single-slot server: always tear down on disconnect. */
+    itsHandle = -1;
     webrtcWsClient = false;
     info("signaling client disconnected\n");
     stopStreaming();
@@ -891,16 +892,17 @@ static void closeUdpSocket() {
 
 static void webrtcTaskFn(void*) {
     /* ITS server for signaling WS */
-    itsServerInit(1, 4096, 4096);
-    itsServerOnConnect(webrtcItsConnect);
-    itsServerOnBusy(webrtcItsBusy);
-    itsServerOnDisconnect(webrtcItsDisconnect);
+    itsServerInit();
+    itsServerPortOpen(WEBRTC_PORT, 1, 4096, 4096);
+    itsServerOnConnect(WEBRTC_PORT, webrtcItsConnect);
+    itsServerOnBusy(WEBRTC_PORT, webrtcItsBusy);
+    itsServerOnDisconnect(WEBRTC_PORT, webrtcItsDisconnect);
 
     /* Register /dc WebSocket endpoint with web task */
     { web_path_msg_t reg = {};
-      reg.itsPort = 4433;  /* convention: use DC's UDP port */
+      reg.itsPort = WEBRTC_PORT;
       safeStrncpy(reg.path, "webrtc", sizeof(reg.path));
-      while (!itsSendAux("web", &reg, sizeof(reg), pdMS_TO_TICKS(500)))
+      while (!itsSendAux("web", WEB_PATH_REG_PORT, &reg, sizeof(reg), pdMS_TO_TICKS(500)))
           vTaskDelay(pdMS_TO_TICKS(100));
     }
 
@@ -1014,7 +1016,7 @@ static void webrtcTaskFn(void*) {
                     n = wsLen;
                 } else if (op < 0) {
                     /* WS closed */
-                    itsServerKick(itsHandle);
+                    itsDisconnect(itsHandle);
                     itsHandle = -1;
                     webrtcWsClient = false;
                 }

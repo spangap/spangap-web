@@ -7,6 +7,12 @@
 #ifndef SECCAM_WEBRTC_TASK_H
 #define SECCAM_WEBRTC_TASK_H
 
+#include <stdint.h>
+
+/** WebRTC's ITS server port for the signaling WebSocket (forwarded by web).
+ *  Convention: matches the default DataChannel UDP port. */
+static constexpr uint16_t WEBRTC_PORT = 4433;
+
 /** Create WebRTC DataChannel task. Call after wgInit() and tlsInit(). */
 void webrtcInit();
 
