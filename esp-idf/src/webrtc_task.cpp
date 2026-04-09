@@ -166,6 +166,7 @@ static size_t lastHandshakeLen = 0;
 /* Prepend AVI-style WCLK chunk: "WCLK" + u32(10) + u64(epoch_ms) + i16(utc_offset_min). */
 static constexpr size_t WCLK_CHUNK_SIZE = 18;
 static uint8_t* frameBuf = nullptr;   /* PSRAM buffer for WCLK + JPEG frame copy */
+static frame_slot_t videoSlot = {};   /* slot for camera/play to deliver into */
 static bool camSubscribed = false;
 static bool playSubscribed = false;
 static bool playbackMode = false;      /* true = frames from play task, false = from camera */
@@ -186,9 +187,7 @@ static uint8_t audioBuf[DC_AUDIO_HDR + DC_AUDIO_DATA];
 #define PLAY_AUDIO_SEND_MAX  8192
 static uint8_t* playAudioSendBuf = nullptr; /* PSRAM, allocated in webrtcInit */
 
-/* Deferred send: handlers copy data and return immediately so ITS_WAIT_PICKUP
- * unblocks the sender (play/camera task) without waiting for DTLS+SCTP+UDP. */
-static size_t pendingVideoLen = 0;
+/* Deferred audio send: handler copies data and returns immediately. */
 static size_t pendingAudioLen = 0;
 static uint8_t* pendingAudioBuf = nullptr;  /* points to audioBuf or playAudioSendBuf */
 
@@ -638,32 +637,12 @@ static void handleSignalingMsg(const char* msg, size_t len) {
     }
 }
 
-/* ---- Start/stop streaming ---- */
-
-static void onCameraFrame(const camera_fb_t* fb) {
-    if (!streaming || !sctp.established) return;
-    size_t copyLen = fb->len < MAX_JPEG_SIZE ? fb->len : MAX_JPEG_SIZE;
-    /* Prefix frame with WCLK chunk (epoch-ms + utc offset, LE). */
-    uint64_t wallMs;
-    int16_t utcOff;
-    if (playbackMode) {
-        wallMs = playFrameEpochMs();
-        utcOff = playFrameUtcOffset();
-    } else {
-        struct timeval tv;
-        gettimeofday(&tv, nullptr);
-        wallMs = (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)tv.tv_usec / 1000ULL;
-        utcOff = utcOffsetMinutes(tv.tv_sec);
-    }
-    memcpy(frameBuf + 0, "WCLK", 4);
-    uint32_t sz = 10;
-    memcpy(frameBuf + 4, &sz, 4);
-    memcpy(frameBuf + 8, &wallMs, 8);
-    memcpy(frameBuf + 16, &utcOff, 2);
-    memcpy(frameBuf + WCLK_CHUNK_SIZE, fb->buf, copyLen);
-    /* Deferred: copy done, sctpSend happens in main loop */
-    pendingVideoLen = WCLK_CHUNK_SIZE + copyLen;
-}
+/* ---- Start/stop streaming ----
+ *
+ * Video frames arrive via the slot pattern: cam_task or play task copies the
+ * JPEG into videoSlot.buf at offset WCLK_CHUNK_SIZE. The webrtc main loop
+ * polls the slot, builds the WCLK header from the slot's epochMs/utcOffset,
+ * and sends the resulting buffer over SCTP. */
 
 static void startStreaming() {
     if (streaming) return;
@@ -672,11 +651,15 @@ static void startStreaming() {
     storageCopyNoNotify("s.stream.audio.", "audio.");
 
     int fps = storageGetInt("s.stream.max_fps", 20);
+    /* Video slot — producer (camera or play) writes JPEG at frameBuf + WCLK_CHUNK_SIZE,
+     * we build the WCLK header in frameBuf[0..WCLK_CHUNK_SIZE] at processing time. */
+    frameSlotInit(&videoSlot, frameBuf, WCLK_CHUNK_SIZE + MAX_JPEG_SIZE, WCLK_CHUNK_SIZE, fps);
+    videoSlot.consumerTask = xTaskGetCurrentTaskHandle();
     if (playbackMode) {
-        playSubscribeVideo(fps, onCameraFrame);
+        playSubscribeVideoSlot(&videoSlot);
         playSubscribed = true;
     } else {
-        cameraSubscribe(fps, onCameraFrame);
+        cameraSubscribeSlot(&videoSlot);
         camSubscribed = true;
     }
 
@@ -755,10 +738,9 @@ static void startStreaming() {
 
 static void stopStreaming() {
     if (!streaming) return;
-    if (camSubscribed) { cameraUnsubscribe(); camSubscribed = false; }
-    if (playSubscribed) { playUnsubscribeVideo(); playUnsubscribeAudio(); playSubscribed = false; }
+    if (camSubscribed) { cameraUnsubscribeSlot(&videoSlot); camSubscribed = false; }
+    if (playSubscribed) { playUnsubscribeVideoSlot(); playUnsubscribeAudio(); playSubscribed = false; }
     if (!playbackMode) audioStop();
-    pendingVideoLen = 0;
     pendingAudioLen = 0;
     pendingAudioBuf = nullptr;
     sctpRexmitFree(&sctp);
@@ -970,19 +952,10 @@ static void webrtcTaskFn(void*) {
     }
 
     for (;;) {
-        /* ITS messages (camera/audio/signaling) + deferred SCTP sends.
-         * Handlers just copy data; sctpSend runs here after each pickup
-         * so the sender is unblocked early but no frames are lost. */
+        /* ITS messages (audio/signaling). Video uses the slot pattern,
+         * audio still uses the deferred-send (handler copies, send here). */
         for (;;) {
             if (!itsPoll(udpFd >= 0 ? 1 : portMAX_DELAY)) break;
-            if (pendingVideoLen > 0) {
-                int vidCh = sctpFindChannel(&sctp, "video");
-                if (vidCh >= 0)
-                    sctpSend(&sctp, sctp.channels[vidCh].streamId,
-                             PPID_BINARY, frameBuf, pendingVideoLen,
-                             dtlsSctpSend, nullptr);
-                pendingVideoLen = 0;
-            }
             if (pendingAudioLen > 0 && pendingAudioBuf) {
                 int audCh = sctpFindChannel(&sctp, "audio");
                 if (audCh >= 0)
@@ -992,6 +965,26 @@ static void webrtcTaskFn(void*) {
                 pendingAudioLen = 0;
                 pendingAudioBuf = nullptr;
             }
+        }
+
+        /* Drain video slot — producer (cam_task or play) writes frames here.
+         * itsPoll above is woken by the producer's task notification. */
+        if (streaming && sctp.established && frameSlotTake(&videoSlot)) {
+            /* Build WCLK header from slot timestamps */
+            memcpy(frameBuf + 0, "WCLK", 4);
+            uint32_t sz = 10;
+            memcpy(frameBuf + 4, &sz, 4);
+            uint64_t wallMs = videoSlot.epochMs;
+            int16_t  utcOff = videoSlot.utcOffset;
+            memcpy(frameBuf + 8, &wallMs, 8);
+            memcpy(frameBuf + 16, &utcOff, 2);
+            size_t totalLen = WCLK_CHUNK_SIZE + videoSlot.len;
+            int vidCh = sctpFindChannel(&sctp, "video");
+            if (vidCh >= 0)
+                sctpSend(&sctp, sctp.channels[vidCh].streamId,
+                         PPID_BINARY, frameBuf, totalLen,
+                         dtlsSctpSend, nullptr);
+            frameSlotRelease(&videoSlot);
         }
 
         /* Drain UDP socket */
