@@ -196,7 +196,6 @@ export const useDeviceStore = defineStore('device', () => {
   function connect() {
     if (ws) return
     const url = wsUrl()
-
     try {
       ws = new WebSocket(url)
     } catch {
@@ -308,6 +307,16 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
+  /** Send a pre-built nested JSON object to the device and merge locally.
+   *  Use for operations that can't be expressed as a single dot-path set
+   *  (e.g., replacing an entire array). */
+  function sendJson(obj: Record<string, any>) {
+    deepMerge(settings, obj)
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify(obj)) } catch { /* */ }
+    }
+  }
+
   /** Force immediate settings write on device. */
   function save() {
     if (ws && ws.readyState === WebSocket.OPEN) {
@@ -327,5 +336,5 @@ export const useDeviceStore = defineStore('device', () => {
     ws = null
   })
 
-  return { settings, connected, get, set, save, connect }
+  return { settings, connected, get, set, sendJson, save, connect }
 })

@@ -20,6 +20,7 @@
 #include "web.h"
 #include "auth.h"
 #include "play.h"
+#include "upnp.h"
 
 #include "esp_netif.h"
 #include <cstring>
@@ -508,6 +509,15 @@ static std::string generateSdpAnswer(const char* offerSdp) {
         snprintf(line, sizeof(line),
             "a=candidate:%d 1 UDP %u %s %d typ host\r\n",
             i + 1, (unsigned)(2130706431 - i), ips[i], port);
+        sdp += line;
+    }
+
+    /* Add server-reflexive candidate with UPnP external IP (for remote access) */
+    const char* extIp = upnpExternalIp();
+    if (extIp[0] && numIps > 0) {
+        snprintf(line, sizeof(line),
+            "a=candidate:%d 1 UDP %u %s %d typ srflx raddr %s rport %d\r\n",
+            numIps + 1, (unsigned)(2130706431 - numIps - 1), extIp, port, ips[0], port);
         sdp += line;
     }
 
