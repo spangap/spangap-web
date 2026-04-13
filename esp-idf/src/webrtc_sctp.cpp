@@ -240,7 +240,16 @@ static size_t buildForwardTsn(sctp_assoc_t* a, uint32_t newCumTsn, uint8_t* out)
     out[pos++] = 0;
     pos += 2; /* length placeholder */
     w32(out + pos, newCumTsn); pos += 4;
-    /* No per-stream info needed — all our channels are unordered (SSN=0) */
+    /* RFC 3758 §3.2: list each stream whose TSNs are being abandoned so the
+       receiver flushes its per-stream reassembly queue. Required even for
+       unordered streams (SSN=0 in the pair) — without this, dcSCTP leaks
+       orphan fragments into the reassembly buffer, eventually starving
+       a_rwnd and freezing the association (death at ~200k chunks). */
+    for (int i = 0; i < a->numChannels; i++) {
+        if (!a->channels[i].open) continue;
+        w16(out + pos, a->channels[i].streamId); pos += 2;  /* Stream-N */
+        w16(out + pos, 0); pos += 2;                         /* SSN-N (0=unordered) */
+    }
     w16(out + chunkStart + 2, (uint16_t)(pos - chunkStart));
     sctpSetChecksum(out, pos);
     return pos;

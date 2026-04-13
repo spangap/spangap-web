@@ -264,6 +264,75 @@ static int webrtcBioRecv(void* ctx, unsigned char* buf, size_t len) {
     return (int)n;
 }
 
+/* ClientHello reassembly for mbedTLS 3.6.
+ *
+ * mbedTLS ssl_parse_client_hello() (ssl_tls12_server.c:1073) refuses to parse a
+ * DTLS ClientHello that arrives fragmented across multiple records ("We don't
+ * support fragmentation of ClientHello (yet?)"). Since Chrome 137 default-
+ * enabled DTLS 1.3 and post-quantum hybrid key_share (X25519MLKEM768, ext
+ * 0x0033) for WebRTC, the ClientHello grew to ~1.4 KB and now always fragments
+ * at the ~1200-byte MTU. Result: every Chrome client fails the handshake.
+ *
+ * Workaround: reassemble fragments in our UDP intake and hand mbedTLS a single
+ * synthetic unfragmented record. Remove this once mbedTLS upstream supports
+ * ClientHello fragmentation. Safe against DoS because our DTLS cookie check
+ * still runs first on fragment 1 (cookie check only inspects bytes 0..60,
+ * which fragment 1 always contains in full). */
+static uint8_t* chReasmBuf = nullptr;    // 13 + 12 + hsLen
+static size_t   chReasmLen = 0;
+static size_t   chReasmBodyLen = 0;      // handshake body length
+static size_t   chReasmFilled = 0;       // body bytes filled so far
+static uint16_t chReasmMsgSeq = 0xffff;
+
+static void chReasmFree() {
+    free(chReasmBuf);
+    chReasmBuf = nullptr;
+    chReasmLen = chReasmBodyLen = chReasmFilled = 0;
+    chReasmMsgSeq = 0xffff;
+}
+
+/* Returns: 0=pass through pkt unchanged, 1=reassembled (use chReasmBuf/Len),
+   -1=consumed, still waiting for more fragments (caller must not feed mbedTLS). */
+static int tryReassembleClientHello(const uint8_t* pkt, size_t n) {
+    if (n < 25 || pkt[0] != 0x16) return 0;                 // not handshake
+    uint16_t epoch = (pkt[3] << 8) | pkt[4];
+    if (epoch != 0) return 0;                               // post-handshake
+    if (pkt[13] != 0x01) return 0;                          // not ClientHello
+    size_t   hsLen   = ((size_t)pkt[14] << 16) | (pkt[15] << 8) | pkt[16];
+    uint16_t msgSeq  = (pkt[17] << 8) | pkt[18];
+    size_t   fragOff = ((size_t)pkt[19] << 16) | (pkt[20] << 8) | pkt[21];
+    size_t   fragLen = ((size_t)pkt[22] << 16) | (pkt[23] << 8) | pkt[24];
+    if (fragOff == 0 && fragLen == hsLen) return 0;         // unfragmented
+    if (25 + fragLen > n) return 0;                         // truncated
+    if (hsLen > 16384) return 0;                            // sanity
+
+    if (fragOff == 0 || chReasmMsgSeq != msgSeq || !chReasmBuf) {
+        chReasmFree();
+        chReasmLen = 25 + hsLen;
+        chReasmBuf = (uint8_t*)malloc(chReasmLen);
+        if (!chReasmBuf) return 0;
+        memcpy(chReasmBuf, pkt, 25);                        // record + hs hdr
+        uint16_t recLen = (uint16_t)(12 + hsLen);
+        chReasmBuf[11] = recLen >> 8;
+        chReasmBuf[12] = recLen & 0xff;
+        chReasmBuf[19] = 0; chReasmBuf[20] = 0; chReasmBuf[21] = 0;
+        chReasmBuf[22] = (hsLen >> 16) & 0xff;
+        chReasmBuf[23] = (hsLen >> 8)  & 0xff;
+        chReasmBuf[24] =  hsLen        & 0xff;
+        chReasmBodyLen = hsLen;
+        chReasmMsgSeq  = msgSeq;
+    }
+    if (fragOff + fragLen > chReasmBodyLen) return 0;       // bogus
+    memcpy(chReasmBuf + 25 + fragOff, pkt + 25, fragLen);
+    chReasmFilled += fragLen;
+    if (chReasmFilled >= chReasmBodyLen) {
+        info("DTLS: reassembled fragmented ClientHello (%u bytes)\n",
+             (unsigned)chReasmLen);
+        return 1;
+    }
+    return -1;
+}
+
 /* ---- ICE-lite: STUN binding request/response ---- */
 
 static const uint32_t STUN_MAGIC = 0x2112A442;
@@ -422,6 +491,7 @@ static void dtlsSessionFree() {
     mbedtls_ssl_free(&dtls);
     dtlsSessionActive = false;
     dtlsConnected = false;
+    chReasmFree();
 }
 
 /* ---- Send SCTP data through DTLS ---- */
@@ -801,16 +871,24 @@ static void handleUdpPacket(const uint8_t* buf, size_t n,
         }
     }
 
-    /* Feed to DTLS */
-    bioRecvBuf = (uint8_t*)buf;
-    bioRecvLen = n;
+    /* Feed to DTLS (reassemble fragmented ClientHello first — see
+       tryReassembleClientHello comment). */
+    if (!dtlsConnected) {
+        int r = tryReassembleClientHello(buf, n);
+        if (r < 0) return;                  // waiting for more fragments
+        if (r > 0) { bioRecvBuf = chReasmBuf; bioRecvLen = chReasmLen; }
+        else       { bioRecvBuf = (uint8_t*)buf; bioRecvLen = n; }
+    } else {
+        bioRecvBuf = (uint8_t*)buf;
+        bioRecvLen = n;
+    }
 
     if (!dtlsConnected && dtlsSessionActive) {
-        if (n == lastHandshakeLen) {
-            dbg("skipping likely retransmit (%d bytes)\n", (int)n);
+        if (bioRecvLen == (size_t)lastHandshakeLen) {
+            dbg("skipping likely retransmit (%d bytes)\n", (int)bioRecvLen);
             return;
         }
-        lastHandshakeLen = n;
+        lastHandshakeLen = bioRecvLen;
         dbg("DTLS handshake step (%d bytes from %s)\n",
              (int)n, inet_ntoa(from->sin_addr));
         int ret = mbedtls_ssl_handshake(&dtls);
