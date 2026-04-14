@@ -1,10 +1,19 @@
-import { ref, reactive, computed, watch } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { useMenuStore } from '../stores/menu'
-import { useDeviceStore } from '../stores/device'
 
-/* ── Visibility ── */
+/* ── Visibility ──
+ * These start false; FloatingWindow restores its own saved visibility from
+ * localStorage on mount and emits update:visible to reflect it. */
 export const cliVisible = ref(false)
 export const logVisible = ref(false)
+
+/* ── Log backlog ──
+ * Number of bytes the /log WS should replay on connect. Stored in localStorage. */
+const BACKLOG_KEY = 'seccam.log.backlog'
+export const logBacklogBytes = ref(Number(localStorage.getItem(BACKLOG_KEY) ?? 8192) || 8192)
+function persistBacklog() {
+  try { localStorage.setItem(BACKLOG_KEY, String(logBacklogBytes.value)) } catch { /* ignore */ }
+}
 
 /* ── Dock system ──
  * A window can be docked to one edge (top/bottom/left/right) or floating (null).
@@ -89,26 +98,31 @@ export const videoStyle = computed(() => {
   }
 })
 
+import DeveloperPanel from './panels/DeveloperPanel.vue'
+
+const BACKLOG_PRESETS: Array<[string, number]> = [
+  ['1 kB', 1024],
+  ['4 kB', 4096],
+  ['8 kB', 8192],
+  ['16 kB', 16384],
+  ['64 kB', 65536],
+]
+
 export function registerAdvanced() {
   useMenuStore().register('advanced', 'Advanced', 90, [
-    { id: 'adv.cli', label: 'CLI', type: 'action', order: 10, action: () => { cliVisible.value = !cliVisible.value } },
-    { id: 'adv.log', label: 'System Log', type: 'action', order: 20, action: () => { logVisible.value = !logVisible.value } },
+    { id: 'adv.cli', label: 'Show CLI', type: 'action', order: 10,
+      action: () => { cliVisible.value = !cliVisible.value } },
+    { id: 'adv.log', label: 'Show Log', type: 'action', order: 20,
+      action: () => { logVisible.value = !logVisible.value } },
+    { id: 'adv.backlog', label: 'Backlog Size', type: 'submenu', order: 25,
+      children: BACKLOG_PRESETS.map(([label, bytes], i) => ({
+        id: `adv.backlog.${bytes}`,
+        label,
+        type: 'action' as const,
+        order: (i + 1) * 10,
+        action: () => { logBacklogBytes.value = bytes; persistBacklog() },
+      })),
+    },
+    { id: 'adv.dev', label: 'Developer Options', type: 'panel', order: 30, component: DeveloperPanel },
   ])
-
-  /* Restore visibility + dock state from config when device connects */
-  const device = useDeviceStore()
-  watch(() => device.connected, (connected) => {
-    if (!connected) return
-    if (device.get('s.cli.win.visible') === 1) cliVisible.value = true
-    if (device.get('s.log.win.visible') === 1) logVisible.value = true
-
-    /* Restore docks — vertical (top/bottom) before horizontal for deterministic order */
-    for (const id of ['cli', 'log']) {
-      const side = device.get(`s.${id}.win.dock`) as string
-      const size = device.get(`s.${id}.win.dock_size`) as number
-      if (side && side !== '' && typeof size === 'number') {
-        dockWindow(id, side as DockSide, size)
-      }
-    }
-  })
 }
