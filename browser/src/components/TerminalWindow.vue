@@ -140,7 +140,8 @@ function scheduleReconnect() {
 
 function wsUrl(): string {
   let url = `${deviceWssBase()}${props.endpoint}`
-  if (props.backlogBytes && props.backlogBytes > 0) {
+  /* Backlog only on first connect — reconnects pick up live from here. */
+  if (!wasConnected && props.backlogBytes && props.backlogBytes > 0) {
     const sep = url.includes('?') ? '&' : '?'
     url += `${sep}backlog=${props.backlogBytes}`
   }
@@ -195,23 +196,9 @@ function disconnectWs() {
 
 /* ── lifecycle ── */
 
-/* Defer WS connect during the first 10s after page load: on a fresh load with
- * multiple windows auto-restored, opening /cli + /log in parallel with /epl +
- * /webrtc overwhelms net's single-threaded TLS accept and /webrtc gets stuck.
- * Letting the player connect first is the workaround until everything moves
- * to DataChannels. The visibility prop can flip false→true during mount as
- * FloatingWindow reads localStorage, so we gate both onMounted and the watch. */
-const PAGE_LOAD_GUARD_MS = 10000
-const pageLoadAt = Date.now()
-function connectWhenAllowed() {
-  const elapsed = Date.now() - pageLoadAt
-  if (elapsed >= PAGE_LOAD_GUARD_MS) connectWs()
-  else setTimeout(connectWs, PAGE_LOAD_GUARD_MS - elapsed)
-}
-
 function showWindow() {
   createTerminal()
-  connectWhenAllowed()
+  connectWs()
   setTimeout(() => {
     fitAddon?.fit()
     if (!props.readonly) term?.focus()
