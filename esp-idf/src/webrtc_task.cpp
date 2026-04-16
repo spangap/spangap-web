@@ -981,7 +981,7 @@ static void closeUdpSocket() {
 static void webrtcTaskFn(void*) {
     /* ITS server for signaling WS */
     itsServerInit();
-    itsServerPortOpen(WEBRTC_PORT, 1, 4096, 4096);
+    itsServerPortOpen(WEBRTC_PORT, false, 1, 4096, 4096);
     itsServerOnConnect(WEBRTC_PORT, webrtcItsConnect);
     itsServerOnBusy(WEBRTC_PORT, webrtcItsBusy);
     itsServerOnDisconnect(WEBRTC_PORT, webrtcItsDisconnect);
