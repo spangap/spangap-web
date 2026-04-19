@@ -212,8 +212,8 @@ export const useDeviceStore = defineStore('device', () => {
       flushPendingSets()
       /* Full dump may arrive after open; re-flush so toggles like record.* win over stale merge. */
       setTimeout(() => flushPendingSets(), 300)
-      /* Reset playback to live on (re)connect — prevents stale playback state after browser reload */
-      set('play.source', 'live')
+      /* Playback selection is browser-local (Pinia playback store); the
+       * device has no persistent playback state to reset on reconnect. */
     }
 
     ws.onmessage = (ev) => {

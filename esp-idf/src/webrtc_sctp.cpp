@@ -3,13 +3,15 @@
  *
  * Server-side only (browser initiates). Supports:
  *   - Four-way handshake with stateless cookie
- *   - DATA send (fragmented) + receive (small DCEP messages)
+ *   - DATA send (fragmented, ordered or unordered) + receive (small DCEP)
  *   - SACK generation + parsing
- *   - DCEP DATA_CHANNEL_OPEN/ACK
+ *   - DCEP DATA_CHANNEL_OPEN/ACK with protocol string extraction
+ *   - RE-CONFIG stream reset (RFC 6525) in both directions
  *   - HEARTBEAT/HEARTBEAT-ACK
  *   - CRC32C checksum
  */
 #include "webrtc_sctp.h"
+#include "compat.h"    /* millis() — must share a clock with main loop's RTO check */
 #include "log.h"
 #include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
@@ -57,7 +59,6 @@ static const uint32_t crc32c_table[256] = {
 };
 
 uint32_t crc32c(const uint8_t* data, size_t len) {
-    /* Compute CRC32C using polynomial 0x82F63B78 (Castagnoli, reflected) */
     uint32_t crc = 0xFFFFFFFF;
     for (size_t i = 0; i < len; i++) {
         crc ^= data[i];
@@ -74,20 +75,16 @@ static inline uint32_t r32(const uint8_t* p) { return (p[0]<<24)|(p[1]<<16)|(p[2
 static inline void w16(uint8_t* p, uint16_t v) { p[0]=v>>8; p[1]=v; }
 static inline void w32(uint8_t* p, uint32_t v) { p[0]=v>>24; p[1]=v>>16; p[2]=v>>8; p[3]=v; }
 
-/* Round up to 4-byte boundary */
 static inline size_t pad4(size_t n) { return (n + 3) & ~3; }
 
 static void sctpSetChecksum(uint8_t* pkt, size_t len) {
     w32(pkt + 8, 0);
-    /* CRC32C stored in SCTP in little-endian (RFC 3309 appendix, Chrome byte-swaps) */
     uint32_t c = crc32c(pkt, len);
     pkt[8] = c & 0xff;
     pkt[9] = (c >> 8) & 0xff;
     pkt[10] = (c >> 16) & 0xff;
     pkt[11] = (c >> 24) & 0xff;
 }
-
-/* Checksum verification skipped — DTLS provides integrity (RFC 8261) */
 
 /* ---- Cookie: HMAC-SHA256 based stateless verification ---- */
 
@@ -103,8 +100,7 @@ struct sctp_cookie {
 };
 
 static void cookieCompute(const sctp_assoc_t* a, sctp_cookie* c) {
-    /* HMAC = SHA256(secret || peerTag || myTag || peerTsn || myTsn || ports || ts) */
-    uint8_t buf[32 + 20]; /* secret + fields */
+    uint8_t buf[32 + 20];
     memcpy(buf, a->cookieSecret, 32);
     w32(buf + 32, c->peerTag);
     w32(buf + 36, c->myTag);
@@ -127,7 +123,7 @@ static size_t writeHeader(uint8_t* out, uint16_t srcPort, uint16_t dstPort, uint
     w16(out, srcPort);
     w16(out + 2, dstPort);
     w32(out + 4, vTag);
-    w32(out + 8, 0); /* checksum placeholder */
+    w32(out + 8, 0);
     return 12;
 }
 
@@ -137,16 +133,20 @@ static size_t buildInitAck(sctp_assoc_t* a, const uint8_t* initChunk, size_t ini
                            uint16_t peerPort, uint8_t* out, size_t outSize) {
     if (initLen < 16) return 0;
 
-    /* INIT body: Initiate Tag(4) + A-RWND(4) + OS(2) + MIS(2) + Initial TSN(4) */
-    uint32_t peerTag = r32(initChunk + 0);
-    uint32_t peerTsn = r32(initChunk + 12);
+    uint32_t peerTag  = r32(initChunk + 0);
+    uint32_t peerArwnd = r32(initChunk + 4);   /* peer's receive window */
+    uint32_t peerTsn  = r32(initChunk + 12);
 
-    /* Generate our tag and TSN */
+    /* Stash the advertised receiver window so sctpSend can honor it
+       before the first SACK arrives. Safe even though INIT is stateless
+       on our end — `a` is the single global association, and cookie_echo
+       just confirms the same peer. */
+    if (peerArwnd > 0) a->peerRwnd = peerArwnd;
+
     uint32_t myTag = esp_random();
     if (myTag == 0) myTag = 1;
     uint32_t myTsn = esp_random();
 
-    /* Build cookie */
     sctp_cookie cookie = {};
     cookie.peerTag = peerTag;
     cookie.myTag = myTag;
@@ -157,33 +157,36 @@ static size_t buildInitAck(sctp_assoc_t* a, const uint8_t* initChunk, size_t ini
     cookie.timestamp = (uint32_t)(xTaskGetTickCount() / configTICK_RATE_HZ);
     cookieCompute(a, &cookie);
 
-    /* Common header — verification tag = peer's initiate tag (RFC 9260 §8.5.1) */
     size_t pos = writeHeader(out, a->myPort, peerPort, peerTag);
 
-    /* INIT-ACK chunk */
     size_t chunkStart = pos;
     out[pos++] = SCTP_INIT_ACK;
-    out[pos++] = 0; /* flags */
-    pos += 2; /* length placeholder */
+    out[pos++] = 0;
+    pos += 2;
 
-    /* INIT-ACK body (same layout as INIT) */
-    w32(out + pos, myTag); pos += 4;           /* Initiate Tag */
-    w32(out + pos, 65535); pos += 4;           /* A-RWND */
-    w16(out + pos, DC_MAX_CHANNELS); pos += 2; /* OS (outbound streams) */
-    w16(out + pos, DC_MAX_CHANNELS); pos += 2; /* MIS (inbound streams) */
-    w32(out + pos, myTsn); pos += 4;           /* Initial TSN */
+    w32(out + pos, myTag); pos += 4;
+    w32(out + pos, 65535); pos += 4;
+    w16(out + pos, SCTP_ANNOUNCED_STREAMS); pos += 2; /* OS */
+    w16(out + pos, SCTP_ANNOUNCED_STREAMS); pos += 2; /* MIS */
+    w32(out + pos, myTsn); pos += 4;
 
     /* State Cookie parameter (type=7) */
-    w16(out + pos, 7); pos += 2;              /* param type */
-    w16(out + pos, 4 + sizeof(cookie)); pos += 2; /* param length */
+    w16(out + pos, 7); pos += 2;
+    w16(out + pos, 4 + sizeof(cookie)); pos += 2;
     memcpy(out + pos, &cookie, sizeof(cookie));
     pos += pad4(sizeof(cookie));
 
     /* Forward-TSN-Supported parameter (0xC000) — required for PR-SCTP (RFC 3758) */
-    w16(out + pos, 0xC000); pos += 2;  /* param type */
-    w16(out + pos, 4); pos += 2;       /* param length (header only, no value) */
+    w16(out + pos, 0xC000); pos += 2;
+    w16(out + pos, 4); pos += 2;
 
-    /* Patch chunk length */
+    /* Supported Extensions parameter (0x8008) — advertise RE-CONFIG + FORWARD-TSN */
+    w16(out + pos, 0x8008); pos += 2;
+    w16(out + pos, 4 + 2); pos += 2;
+    out[pos++] = SCTP_FORWARD_TSN;
+    out[pos++] = SCTP_RECONFIG;
+    pos = pad4(pos);
+
     w16(out + chunkStart + 2, (uint16_t)(pos - chunkStart));
 
     sctpSetChecksum(out, pos);
@@ -209,11 +212,11 @@ static size_t buildSack(sctp_assoc_t* a, uint8_t* out) {
     size_t pos = writeHeader(out, a->myPort, a->peerPort, a->peerTag);
     out[pos++] = SCTP_SACK;
     out[pos++] = 0;
-    w16(out + pos, 16); pos += 2; /* chunk length: 4 header + 12 body */
-    w32(out + pos, a->peerTsn); pos += 4;  /* cumulative TSN ack */
-    w32(out + pos, 65535); pos += 4;        /* a_rwnd */
-    w16(out + pos, 0); pos += 2;            /* num gap ack blocks */
-    w16(out + pos, 0); pos += 2;            /* num dup TSNs */
+    w16(out + pos, 16); pos += 2;
+    w32(out + pos, a->peerTsn); pos += 4;
+    w32(out + pos, 65535); pos += 4;
+    w16(out + pos, 0); pos += 2;
+    w16(out + pos, 0); pos += 2;
     sctpSetChecksum(out, pos);
     return pos;
 }
@@ -223,7 +226,6 @@ static size_t buildSack(sctp_assoc_t* a, uint8_t* out) {
 static size_t buildHeartbeatAck(sctp_assoc_t* a, const uint8_t* hbChunk, size_t hbLen,
                                 uint8_t* out) {
     size_t pos = writeHeader(out, a->myPort, a->peerPort, a->peerTag);
-    /* Echo the heartbeat chunk as heartbeat-ack (same body, different type) */
     out[pos] = SCTP_HEARTBEAT_ACK;
     memcpy(out + pos + 1, hbChunk + 1, hbLen - 1);
     pos += pad4(hbLen);
@@ -238,21 +240,124 @@ static size_t buildForwardTsn(sctp_assoc_t* a, uint32_t newCumTsn, uint8_t* out)
     size_t chunkStart = pos;
     out[pos++] = SCTP_FORWARD_TSN;
     out[pos++] = 0;
-    pos += 2; /* length placeholder */
+    pos += 2;
     w32(out + pos, newCumTsn); pos += 4;
     /* RFC 3758 §3.2: list each stream whose TSNs are being abandoned so the
-       receiver flushes its per-stream reassembly queue. Required even for
-       unordered streams (SSN=0 in the pair) — without this, dcSCTP leaks
-       orphan fragments into the reassembly buffer, eventually starving
-       a_rwnd and freezing the association (death at ~200k chunks). */
+       receiver flushes its per-stream reassembly queue. */
     for (int i = 0; i < a->numChannels; i++) {
         if (!a->channels[i].open) continue;
-        w16(out + pos, a->channels[i].streamId); pos += 2;  /* Stream-N */
-        w16(out + pos, 0); pos += 2;                         /* SSN-N (0=unordered) */
+        w16(out + pos, a->channels[i].streamId); pos += 2;
+        w16(out + pos, a->channels[i].ssn); pos += 2;
     }
     w16(out + chunkStart + 2, (uint16_t)(pos - chunkStart));
     sctpSetChecksum(out, pos);
     return pos;
+}
+
+/* ---- RE-CONFIG (RFC 6525) ---- */
+
+/* Build a RE-CONFIG chunk with a Reconfiguration Response parameter
+   acknowledging an incoming Outgoing SSN Reset Request. */
+static size_t buildReconfigResponse(sctp_assoc_t* a, uint32_t responseSn,
+                                    uint32_t result, uint8_t* out) {
+    size_t pos = writeHeader(out, a->myPort, a->peerPort, a->peerTag);
+    size_t chunkStart = pos;
+    out[pos++] = SCTP_RECONFIG;
+    out[pos++] = 0;
+    pos += 2;  /* length placeholder */
+
+    /* Reconfiguration Response parameter (type 16): reqSn(4) result(4) */
+    w16(out + pos, RECONFIG_RESPONSE); pos += 2;
+    w16(out + pos, 12); pos += 2;
+    w32(out + pos, responseSn); pos += 4;
+    w32(out + pos, result); pos += 4;
+
+    w16(out + chunkStart + 2, (uint16_t)(pos - chunkStart));
+    pos = pad4(pos);
+    sctpSetChecksum(out, pos);
+    return pos;
+}
+
+/* Build a RE-CONFIG chunk with an Outgoing SSN Reset Request parameter
+   closing the specified stream. */
+static size_t buildReconfigOutReset(sctp_assoc_t* a, uint16_t streamId,
+                                    uint32_t reqSn, uint8_t* out) {
+    size_t pos = writeHeader(out, a->myPort, a->peerPort, a->peerTag);
+    size_t chunkStart = pos;
+    out[pos++] = SCTP_RECONFIG;
+    out[pos++] = 0;
+    pos += 2;  /* length placeholder */
+
+    /* Outgoing SSN Reset Request (type 13):
+       reqSn(4) responseSn(4) senderLastTsn(4) streamIds(2 each) */
+    w16(out + pos, RECONFIG_OUT_SSN_RESET); pos += 2;
+    w16(out + pos, 16 + 2); pos += 2;  /* header + 12 body + 2 for one streamId */
+    w32(out + pos, reqSn); pos += 4;
+    w32(out + pos, reqSn); pos += 4;   /* response-sn reused */
+    w32(out + pos, a->myTsn - 1); pos += 4;
+    w16(out + pos, streamId); pos += 2;
+    pos = pad4(pos);
+
+    w16(out + chunkStart + 2, (uint16_t)(pos - chunkStart));
+    sctpSetChecksum(out, pos);
+    return pos;
+}
+
+/* Forward decls — defined below, used up here by handleReconfigChunk /
+   handleDcepOpen. */
+static void rexmitPurgeStream(sctp_assoc_t* a, uint16_t streamId);
+static int  rexmitInsert(sctp_assoc_t* a, uint16_t streamId, uint32_t ppid,
+                         uint16_t ssn, uint16_t priority,
+                         bool ordered, bool reliableInfinite,
+                         uint8_t maxRexmit, uint32_t firstTsn, uint32_t lastTsn,
+                         const uint8_t* data, size_t dataLen);
+
+static void handleReconfigChunk(sctp_assoc_t* a, const uint8_t* chunk, size_t chunkLen,
+                                uint8_t* out, size_t* outLen) {
+    /* Walk parameters inside the chunk (skip 4-byte chunk header). */
+    size_t pOff = 4;
+    uint32_t responseSn = 0;
+    bool sawOutReset = false;
+    while (pOff + 4 <= chunkLen) {
+        uint16_t ptype = r16(chunk + pOff);
+        uint16_t plen  = r16(chunk + pOff + 2);
+        if (plen < 4 || pOff + plen > chunkLen) break;
+
+        if (ptype == RECONFIG_OUT_SSN_RESET && plen >= 16) {
+            /* reqSn(4) responseSn(4) lastTsn(4) streamIds(...) */
+            responseSn = r32(chunk + pOff + 4);
+            size_t idsOff = pOff + 16;
+            size_t idsEnd = pOff + plen;
+            while (idsOff + 2 <= idsEnd) {
+                uint16_t sid = r16(chunk + idsOff);
+                idsOff += 2;
+                /* Mark channel closed, purge its rexmit data, fire callback */
+                for (int i = 0; i < a->numChannels; i++) {
+                    if (a->channels[i].open && a->channels[i].streamId == sid) {
+                        a->channels[i].open = false;
+                        rexmitPurgeStream(a, sid);
+                        if (a->onDcreset) a->onDcreset(a, sid);
+                        dbg("DC stream %u closed via RE-CONFIG\n", sid);
+                        break;
+                    }
+                }
+            }
+            sawOutReset = true;
+        } else if (ptype == RECONFIG_RESPONSE && plen >= 12) {
+            /* Peer's response to our outgoing reset — no action required beyond log */
+            uint32_t rSn = r32(chunk + pOff + 4);
+            uint32_t result = r32(chunk + pOff + 8);
+            dbg("RE-CONFIG response reqSn=%u result=%u\n",
+                (unsigned)rSn, (unsigned)result);
+        }
+        /* Parameters pad to 4-byte boundary */
+        pOff += pad4(plen);
+    }
+
+    if (sawOutReset) {
+        /* Respond success */
+        *outLen = buildReconfigResponse(a, responseSn, 0 /* success */, out);
+    }
 }
 
 /* ---- DCEP handling ---- */
@@ -260,53 +365,233 @@ static size_t buildForwardTsn(sctp_assoc_t* a, uint32_t newCumTsn, uint8_t* out)
 static size_t handleDcepOpen(sctp_assoc_t* a, uint16_t streamId,
                              const uint8_t* data, size_t dataLen,
                              uint8_t* out) {
-    if (dataLen < 4) return 0;
+    if (dataLen < 12) return 0;
 
     /* Parse DCEP OPEN: type(1) channelType(1) priority(2) reliability(4) labelLen(2) protoLen(2) */
-    uint8_t channelType = data[1];
-    uint32_t reliability = 0;
-    if (dataLen >= 8)
-        reliability = r32(data + 4);
-    uint16_t labelLen = 0;
-    if (dataLen >= 12)
-        labelLen = r16(data + 8);
+    uint8_t  channelType = data[1];
+    uint16_t priority    = r16(data + 2);
+    uint32_t reliability = r32(data + 4);
+    uint16_t labelLen    = r16(data + 8);
+    uint16_t protoLen    = r16(data + 10);
 
-    /* Check for duplicate stream ID (browser may send on both even and odd) */
+    /* Duplicate stream: re-use the existing slot if already open, otherwise refuse. */
     for (int i = 0; i < a->numChannels; i++) {
-        if (a->channels[i].streamId == streamId) return 0; /* already open */
+        if (a->channels[i].open && a->channels[i].streamId == streamId) return 0;
     }
 
-    /* Register channel */
-    if (a->numChannels < DC_MAX_CHANNELS) {
-        dc_channel_t* ch = &a->channels[a->numChannels];
-        ch->open = true;
-        ch->streamId = streamId;
-        ch->channelType = channelType;
-        ch->reliability = reliability;
-        if (labelLen > 0 && labelLen < sizeof(ch->label) && 12 + labelLen <= dataLen)
-            memcpy(ch->label, data + 12, labelLen);
-        ch->label[labelLen < sizeof(ch->label) ? labelLen : sizeof(ch->label) - 1] = '\0';
-        a->numChannels++;
-        dbg("DC channel %d: \"%s\" type=%d stream=%u\n",
-             a->numChannels - 1, ch->label, channelType, streamId);
+    /* Find free slot — may reuse a closed slot. */
+    int slot = -1;
+    for (int i = 0; i < a->numChannels; i++) {
+        if (!a->channels[i].open) { slot = i; break; }
+    }
+    if (slot < 0 && a->numChannels < DC_MAX_CHANNELS) slot = a->numChannels++;
+    if (slot < 0) {
+        err("DC OPEN rejected: no free channel slot\n");
+        return 0;
     }
 
-    /* Build DCEP ACK as SCTP DATA chunk */
+    dc_channel_t* ch = &a->channels[slot];
+    memset(ch, 0, sizeof(*ch));
+    ch->open = true;
+    ch->streamId = streamId;
+    ch->channelType = channelType;
+    ch->reliability = reliability;
+    ch->priority = priority;
+    ch->ssn = 0;
+
+    /* Label */
+    size_t off = 12;
+    if (labelLen > 0 && labelLen < sizeof(ch->label) && off + labelLen <= dataLen) {
+        memcpy(ch->label, data + off, labelLen);
+        ch->label[labelLen] = '\0';
+    } else {
+        ch->label[0] = '\0';
+    }
+    off += labelLen;
+
+    /* Protocol */
+    if (protoLen > 0 && off + protoLen <= dataLen) {
+        uint16_t copy = protoLen < sizeof(ch->protocol) ? protoLen : (sizeof(ch->protocol) - 1);
+        memcpy(ch->protocol, data + off, copy);
+        ch->protocol[copy] = '\0';
+        ch->protoLen = copy;
+    } else {
+        ch->protocol[0] = '\0';
+        ch->protoLen = 0;
+    }
+
+    dbg("DC channel %d: label=\"%s\" proto=\"%s\" type=0x%02x rel=%u prio=%u stream=%u\n",
+        slot, ch->label, ch->protocol, channelType,
+        (unsigned)reliability, (unsigned)priority, streamId);
+
+    /* Fire onDceopen so higher layer can itsConnect before we ACK. */
+    if (a->onDceopen) a->onDceopen(a, slot);
+
+    /* If higher layer closed the channel during onDceopen, skip ACK. */
+    if (!ch->open) return 0;
+
+    /* DCEP ACK rides the channel as an ordered SCTP DATA chunk — application
+       DATA on this stream must come after it in SSN order, so we consume an
+       SSN here. The ACK also goes into the rexmit pool so it survives a
+       dropped UDP packet (without that, a single lost ACK leaves the peer's
+       cumTsn stuck one TSN short of every subsequent message). */
+    uint32_t tsn = a->myTsn++;
+    uint16_t ssn = ch->ssn++;
     size_t pos = writeHeader(out, a->myPort, a->peerPort, a->peerTag);
     size_t chunkStart = pos;
     out[pos++] = SCTP_DATA;
-    out[pos++] = SCTP_DATA_E | SCTP_DATA_B; /* complete message, ordered */
-    pos += 2; /* length placeholder */
-    w32(out + pos, a->myTsn++); pos += 4; /* TSN */
-    w16(out + pos, streamId); pos += 2;   /* Stream ID */
-    w16(out + pos, 0); pos += 2;          /* SSN */
-    w32(out + pos, PPID_DCEP); pos += 4;  /* PPID */
-    out[pos++] = DCEP_ACK;                /* payload: single byte */
-    /* pad to 4 bytes */
+    out[pos++] = SCTP_DATA_E | SCTP_DATA_B;
+    pos += 2;
+    w32(out + pos, tsn); pos += 4;
+    w16(out + pos, streamId); pos += 2;
+    w16(out + pos, ssn); pos += 2;
+    w32(out + pos, PPID_DCEP); pos += 4;
+    out[pos++] = DCEP_ACK;
     while ((pos - chunkStart) % 4) out[pos++] = 0;
     w16(out + chunkStart + 2, (uint16_t)(pos - chunkStart));
 
     sctpSetChecksum(out, pos);
+
+    /* Put the ACK in the rexmit pool at `high` priority so application data
+       can't crowd it out of the pool's byte quota. */
+    static const uint8_t dcepAckPayload = DCEP_ACK;
+    rexmitInsert(a, streamId, PPID_DCEP, ssn, /*priority=*/1024,
+                 /*ordered=*/true, /*reliableInfinite=*/true,
+                 /*maxRexmit=*/0, tsn, tsn,
+                 &dcepAckPayload, 1);
+
+    return pos;
+}
+
+/* ---- Rexmit pool helpers ---- */
+
+static void rexmitFreeSlot(sctp_assoc_t* a, int i) {
+    rexmit_msg_t& e = a->rexmit[i];
+    if (e.data) {
+        if (a->rexmitBytes >= e.dataLen) a->rexmitBytes -= e.dataLen;
+        else a->rexmitBytes = 0;
+        free(e.data);
+        e.data = nullptr;
+        e.dataLen = 0;
+    }
+}
+
+/* After a stream reset purges that stream's rexmit entries, the peer is
+   still waiting on those TSNs — its cumTsn can't advance past data we've
+   forgotten. Compute the highest TSN safe to tell the peer to skip: one
+   below the lowest unacked TSN still in the pool, or myTsn-1 if the pool
+   is empty. The caller sends a FORWARD-TSN with that value. 0 = no-op. */
+static uint32_t rexmitComputeForwardTsn(sctp_assoc_t* a) {
+    bool any = false;
+    uint32_t lowest = 0;
+    for (int i = 0; i < SCTP_REXMIT_SLOTS; i++) {
+        if (!a->rexmit[i].data) continue;
+        uint32_t ft = a->rexmit[i].firstTsn;
+        if (!any || (int32_t)(ft - lowest) < 0) { lowest = ft; any = true; }
+    }
+    uint32_t advanceTo = any ? (lowest - 1) : (a->myTsn - 1);
+    /* Only useful if it actually moves cumTsn forward. */
+    if ((int32_t)(advanceTo - a->sackCumTsn) <= 0) return 0;
+    return advanceTo;
+}
+
+static void rexmitPurgeStream(sctp_assoc_t* a, uint16_t streamId) {
+    bool anyPurged = false;
+    for (int i = 0; i < SCTP_REXMIT_SLOTS; i++) {
+        if (a->rexmit[i].data && a->rexmit[i].streamId == streamId) {
+            rexmitFreeSlot(a, i);
+            anyPurged = true;
+        }
+    }
+    if (anyPurged) {
+        uint32_t advanceTo = rexmitComputeForwardTsn(a);
+        if (advanceTo != 0) a->pendingFwdTsn = advanceTo;
+    }
+}
+
+/* Per-priority rexmit-pool high-water mark. Higher-priority channels can
+   consume more of the pool; lower-priority ones are capped earlier so a
+   video flood never starves an audio or EPL burst. Thresholds chosen from
+   the four standard DCEP priority levels (128/256/512/1024) with gaps left
+   on purpose for future intermediate classes. */
+static size_t rexmitQuota(uint16_t priority) {
+    if (priority >= 1024) return SCTP_REXMIT_POOL_BYTES;             /* high: full pool */
+    if (priority >=  512) return (SCTP_REXMIT_POOL_BYTES * 7) / 8;   /* medium: 7/8 */
+    if (priority >=  256) return (SCTP_REXMIT_POOL_BYTES * 3) / 4;   /* low: 3/4 */
+    return SCTP_REXMIT_POOL_BYTES / 2;                                /* very-low: 1/2 */
+}
+
+/* Try to insert a fresh message into the rexmit pool. Returns slot index,
+   or -1 if quota full for this priority (caller should back off). */
+static int rexmitInsert(sctp_assoc_t* a, uint16_t streamId, uint32_t ppid,
+                        uint16_t ssn, uint16_t priority,
+                        bool ordered, bool reliableInfinite,
+                        uint8_t maxRexmit, uint32_t firstTsn, uint32_t lastTsn,
+                        const uint8_t* data, size_t dataLen) {
+    if (dataLen + a->rexmitBytes > rexmitQuota(priority)) return -1;
+
+    /* Find empty slot (linear probe from head) */
+    int slot = -1;
+    for (int n = 0; n < SCTP_REXMIT_SLOTS; n++) {
+        int i = (a->rexmitHead + n) % SCTP_REXMIT_SLOTS;
+        if (!a->rexmit[i].data) { slot = i; break; }
+    }
+    if (slot < 0) return -1;  /* all slots full */
+
+    uint8_t* buf = (uint8_t*)heap_caps_malloc(dataLen, MALLOC_CAP_SPIRAM);
+    if (!buf) return -1;
+    memcpy(buf, data, dataLen);
+
+    rexmit_msg_t& e = a->rexmit[slot];
+    e.firstTsn = firstTsn;
+    e.lastTsn = lastTsn;
+    e.streamId = streamId;
+    e.ssn = ssn;
+    e.ppid = ppid;
+    e.ordered = ordered;
+    e.reliableInfinite = reliableInfinite;
+    e.maxRexmit = maxRexmit;
+    e.rexmitCount = 0;
+    e.data = buf;
+    e.dataLen = dataLen;
+    a->rexmitBytes += dataLen;
+    a->rexmitHead = (slot + 1) % SCTP_REXMIT_SLOTS;
+    return slot;
+}
+
+/* ---- Build a DATA fragment packet ---- */
+
+static const size_t MAX_PAYLOAD = 1400;  /* leave room for DTLS+UDP+IP+WG */
+static const size_t CHUNK_HDR = 16;      /* SCTP DATA chunk header */
+static const size_t MAX_DATA = MAX_PAYLOAD - 12 - CHUNK_HDR;
+
+static size_t buildDataFragment(sctp_assoc_t* a, uint32_t tsn, uint16_t streamId,
+                                uint16_t ssn, uint32_t ppid, bool unordered,
+                                bool first, bool last,
+                                const uint8_t* data, size_t fragLen,
+                                uint8_t* pkt) {
+    size_t pos = writeHeader(pkt, a->myPort, a->peerPort, a->peerTag);
+
+    uint8_t flags = 0;
+    if (unordered) flags |= SCTP_DATA_U;
+    if (first)     flags |= SCTP_DATA_B;
+    if (last)      flags |= SCTP_DATA_E | SCTP_DATA_I;
+
+    size_t chunkStart = pos;
+    pkt[pos++] = SCTP_DATA;
+    pkt[pos++] = flags;
+    pos += 2;
+    w32(pkt + pos, tsn); pos += 4;
+    w16(pkt + pos, streamId); pos += 2;
+    w16(pkt + pos, ssn); pos += 2;
+    w32(pkt + pos, ppid); pos += 4;
+    memcpy(pkt + pos, data, fragLen);
+    pos += fragLen;
+
+    w16(pkt + chunkStart + 2, (uint16_t)(pos - chunkStart));
+    while (pos % 4) pkt[pos++] = 0;
+
+    sctpSetChecksum(pkt, pos);
     return pos;
 }
 
@@ -318,16 +603,13 @@ static size_t processDataChunk(sctp_assoc_t* a, const uint8_t* chunk, size_t chu
 
     uint32_t tsn = r32(chunk + 4);
     uint16_t streamId = r16(chunk + 8);
-    /* uint16_t ssn = r16(chunk + 10); */
     uint32_t ppid = r32(chunk + 12);
     const uint8_t* data = chunk + 16;
     size_t dataLen = chunkLen - 16;
-    /* Remove padding bytes from data */
     uint16_t realChunkLen = r16(chunk + 2);
     if (realChunkLen > 16 && realChunkLen - 16 < dataLen)
         dataLen = realChunkLen - 16;
 
-    /* Update peer TSN tracking */
     a->peerTsn = tsn;
 
     size_t outLen = 0;
@@ -335,7 +617,7 @@ static size_t processDataChunk(sctp_assoc_t* a, const uint8_t* chunk, size_t chu
     if (ppid == PPID_DCEP && dataLen > 0 && data[0] == DCEP_OPEN) {
         outLen = handleDcepOpen(a, streamId, data, dataLen, out);
     }
-    /* Other PPIDs from browser (string/binary commands) could be handled here */
+    /* Other PPIDs: inbound user data → handled by caller via onData (future). */
 
     return outLen;
 }
@@ -343,10 +625,16 @@ static size_t processDataChunk(sctp_assoc_t* a, const uint8_t* chunk, size_t chu
 /* ---- Public API ---- */
 
 void sctpInit(sctp_assoc_t* a, uint8_t* outBuf, size_t outBufSize, uint16_t sctpPort) {
+    /* Keep callbacks across init (caller may have registered before we ran). */
+    sctp_dceopen_cb_t saveOpen = a->onDceopen;
+    sctp_dcreset_cb_t saveReset = a->onDcreset;
+    sctpRexmitFree(a);
     memset(a, 0, sizeof(*a));
     a->outBuf = outBuf;
     a->outBufSize = outBufSize;
     a->myPort = sctpPort;
+    a->onDceopen = saveOpen;
+    a->onDcreset = saveReset;
     esp_fill_random(a->cookieSecret, sizeof(a->cookieSecret));
 }
 
@@ -355,16 +643,12 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
     if (pktLen < 12) return -1;
     int peerAbort = 0;
 
-    /* Skip checksum verification — DTLS provides integrity (RFC 8261).
-     * Browser may send CRC32C or zero; either way, DTLS already verified. */
-
     uint16_t srcPort = r16(pkt);
     uint16_t dstPort = r16(pkt + 2);
     uint32_t vTag = r32(pkt + 4);
     verb("SCTP hdr: src=%d dst=%d vTag=0x%08x (our port=%d)\n",
         srcPort, dstPort, (unsigned)vTag, a->myPort);
 
-    /* Process chunks */
     size_t offset = 12;
     while (offset + 4 <= pktLen) {
         uint8_t type = pkt[offset];
@@ -377,14 +661,12 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
 
         switch (type) {
             case SCTP_INIT:
-                /* INIT must have vTag=0 */
                 if (vTag != 0) { dbg("SCTP INIT bad vTag=%u\n", (unsigned)vTag); break; }
                 *outLen = buildInitAck(a, chunk + 4, chunkLen - 4, srcPort,
                                        a->outBuf, a->outBufSize);
                 break;
 
             case SCTP_COOKIE_ECHO: {
-                /* Validate cookie */
                 if (chunkLen < 4 + sizeof(sctp_cookie)) break;
                 const sctp_cookie* cookie = (const sctp_cookie*)(chunk + 4);
                 if (!cookieVerify(a, cookie)) {
@@ -392,14 +674,13 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
                     break;
                 }
 
-                /* Establish association */
                 a->established = true;
                 a->peerTag = cookie->peerTag;
                 a->myTag = cookie->myTag;
                 a->myTsn = cookie->myTsn;
-                a->peerTsn = cookie->peerTsn - 1; /* will be incremented by first DATA */
+                a->peerTsn = cookie->peerTsn - 1;
                 a->peerPort = cookie->peerPort;
-                a->peerRwnd = 65535;
+                /* peerRwnd was set from INIT's a_rwnd in buildInitAck. */
 
                 *outLen = buildCookieAck(a, a->outBuf);
                 info("SCTP association established\n");
@@ -409,7 +690,6 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
             case SCTP_DATA:
                 if (!a->established || vTag != a->myTag) break;
                 *outLen = processDataChunk(a, chunk, chunkLen, a->outBuf, a->outBufSize);
-                /* Send SACK if no DCEP response piggybacked */
                 if (*outLen == 0)
                     *outLen = buildSack(a, a->outBuf);
                 break;
@@ -422,31 +702,52 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
                     a->sackCumTsn = cumTsn;
                     uint16_t numGaps = r16(chunk + 12);
                     uint16_t numDups = r16(chunk + 14);
-                    if (numGaps > 0)
-                        verb("SACK cumTsn=%u gaps=%u dups=%u rwnd=%u (our TSN=%u)\n",
-                             (unsigned)cumTsn, numGaps, numDups,
-                             (unsigned)a->peerRwnd, (unsigned)a->myTsn);
-                    /* Free acked entries from retransmit buffer */
+                    /* Store gap blocks so retransmit can target only the
+                       holes. Each block is two 16-bit offsets from cumTsn
+                       describing an already-received range (start..end). */
+                    size_t gapOff = 16;
+                    uint16_t storeGaps = numGaps;
+                    if (storeGaps > 128) storeGaps = 128;
+                    for (uint16_t g = 0; g < storeGaps; g++) {
+                        if (gapOff + 4 > chunkLen) { storeGaps = g; break; }
+                        a->sackGapStart[g] = r16(chunk + gapOff);
+                        a->sackGapEnd[g]   = r16(chunk + gapOff + 2);
+                        gapOff += 4;
+                    }
+                    a->sackNumGaps = storeGaps;
+                    /* Must match the RTO check's clock (millis()) — mixing
+                       clocks here causes wraparound in the elapsed-time
+                       subtraction and fires spurious retransmits. */
+                    a->lastSackMs = millis();
+                    /* Free any pool entry whose TSN range the peer has
+                       entirely acknowledged — either covered by cumTsn,
+                       or lying fully within a Gap Ack Block (received
+                       out of order past an earlier loss). Gap-block
+                       freeing is important when cumTsn is stuck behind
+                       an abandoned stream's TSNs: new in-flight data
+                       still clears out normally. */
                     for (int i = 0; i < SCTP_REXMIT_SLOTS; i++) {
-                        auto& e = a->rexmit[i];
+                        rexmit_msg_t& e = a->rexmit[i];
                         if (!e.data) continue;
-                        /* TSN <= cumTsn means acked */
-                        int32_t diff = (int32_t)(e.tsn - cumTsn);
-                        if (diff <= 0) { free(e.data); e.data = nullptr; continue; }
-                        /* Check if TSN falls in a gap ack block (= received) */
-                        const uint8_t* gaps = chunk + 16;
-                        for (uint16_t g = 0; g < numGaps && 16 + g * 4 + 3 < chunkLen; g++) {
-                            uint16_t start = r16(gaps + g * 4);
-                            uint16_t end   = r16(gaps + g * 4 + 2);
-                            uint32_t gapStart = cumTsn + start;
-                            uint32_t gapEnd   = cumTsn + end;
-                            if (e.tsn >= gapStart && e.tsn <= gapEnd) {
-                                free(e.data); e.data = nullptr; break;
+                        if ((int32_t)(e.lastTsn - cumTsn) <= 0) {
+                            rexmitFreeSlot(a, i);
+                            continue;
+                        }
+                        for (uint16_t g = 0; g < storeGaps; g++) {
+                            int32_t lo = (int32_t)(e.firstTsn - cumTsn);
+                            int32_t hi = (int32_t)(e.lastTsn  - cumTsn);
+                            if (lo >= (int32_t)a->sackGapStart[g] &&
+                                hi <= (int32_t)a->sackGapEnd[g]) {
+                                rexmitFreeSlot(a, i);
+                                break;
                             }
                         }
                     }
-                    /* Only trigger retransmit when there are actual gaps */
                     if (numGaps > 0) a->sackHasGaps = true;
+                    verb("SACK cumTsn=%u rwnd=%u gaps=%u dups=%u rexmitBytes=%u myTsn=%u\n",
+                         (unsigned)cumTsn, (unsigned)a->peerRwnd,
+                         numGaps, numDups,
+                         (unsigned)a->rexmitBytes, (unsigned)a->myTsn);
                 }
                 break;
 
@@ -458,14 +759,12 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
 
             case SCTP_ABORT:
                 if (a->established) {
-                    /* Log error causes if present (RFC 4960 §3.3.7) */
                     size_t cOff = 4;
                     while (cOff + 4 <= chunkLen) {
                         uint16_t causeCode = r16(chunk + cOff);
                         uint16_t causeLen  = r16(chunk + cOff + 2);
                         dbg("SCTP ABORT cause=%u len=%u\n", causeCode, causeLen);
                         if (causeLen > 4 && cOff + causeLen <= chunkLen) {
-                            /* Cause value may contain a reason string */
                             size_t valLen = causeLen - 4;
                             char reason[64];
                             if (valLen >= sizeof(reason)) valLen = sizeof(reason) - 1;
@@ -476,8 +775,14 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
                         if (causeLen < 4) break;
                         cOff += pad4(causeLen);
                     }
-                    if (cOff == 4)
-                        dbg("SCTP ABORT (no cause codes)\n");
+                    /* Fire onDcreset for every open channel before teardown. */
+                    if (a->onDcreset) {
+                        for (int i = 0; i < a->numChannels; i++) {
+                            if (a->channels[i].open)
+                                a->onDcreset(a, a->channels[i].streamId);
+                            a->channels[i].open = false;
+                        }
+                    }
                     a->established = false;
                     a->numChannels = 0;
                     sctpRexmitFree(a);
@@ -485,8 +790,12 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
                 }
                 break;
 
+            case SCTP_RECONFIG:
+                if (!a->established) break;
+                handleReconfigChunk(a, chunk, chunkLen, a->outBuf, outLen);
+                break;
+
             case SCTP_FORWARD_TSN:
-                /* Browser may send this — just update our TSN tracking */
                 if (chunkLen >= 8)
                     a->peerTsn = r32(chunk + 4);
                 break;
@@ -502,126 +811,243 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
     return peerAbort;
 }
 
+/* ---- sctpSend ---- */
+
 int sctpSend(sctp_assoc_t* a, uint16_t streamId, uint32_t ppid,
              const uint8_t* data, size_t dataLen,
              sctp_send_fn sendFn, void* ctx) {
     if (!a->established) return -1;
 
-    /* Max payload per SCTP packet — room for DTLS(13) + UDP(8) + IP(20) + WG(60) */
-    const size_t MAX_PAYLOAD = 1400;
-    const size_t CHUNK_HDR = 16; /* DATA chunk header */
-    const size_t maxData = MAX_PAYLOAD - 12 - CHUNK_HDR; /* minus common header + chunk header */
-
-    /* Look up channel for reliability info */
-    uint8_t maxRexmit = 0;
+    /* Look up channel to pick ordered/reliability */
+    dc_channel_t* ch = nullptr;
     for (int i = 0; i < a->numChannels; i++) {
-        if (a->channels[i].streamId == streamId) {
-            uint8_t ct = a->channels[i].channelType;
-            if (ct == DC_UNRELIABLE_REXMIT || ct == DC_UNRELIABLE_REXMIT_UNO)
-                maxRexmit = (uint8_t)(a->channels[i].reliability & 0xFF);
+        if (a->channels[i].open && a->channels[i].streamId == streamId) {
+            ch = &a->channels[i];
             break;
         }
     }
 
+    /* Defaults if no channel (e.g. raw DCEP): ordered, reliable, top priority. */
+    bool unordered        = false;
+    bool reliableInfinite = true;
+    uint8_t maxRexmit     = 0;
+    uint16_t priority     = 1024;   /* treat control as top priority */
+
+    if (ch) {
+        unordered = (ch->channelType & 0x80) != 0;
+        uint8_t base = ch->channelType & 0x7F;
+        reliableInfinite = (base == 0x00);
+        bool partialRexmit = (base == 0x01);
+        bool timed         = (base == 0x02);
+        if (partialRexmit) {
+            maxRexmit = (ch->reliability > 255) ? 255 : (uint8_t)ch->reliability;
+        } else if (timed) {
+            /* PR_SCTP TIMED not modelled precisely — treat as small retry budget. */
+            reliableInfinite = false;
+            maxRexmit = 3;
+        }
+        priority = ch->priority;
+    }
+
+    /* Number of fragments */
+    size_t nFrags = dataLen ? ((dataLen + MAX_DATA - 1) / MAX_DATA) : 1;
+
+    /* Allocate contiguous TSN range */
+    uint32_t firstTsn = a->myTsn;
+    uint32_t lastTsn  = firstTsn + (uint32_t)nFrags - 1;
+    a->myTsn += (uint32_t)nFrags;
+
+    /* SSN (ordered only) */
+    uint16_t ssn = 0;
+    if (!unordered && ch) {
+        ssn = ch->ssn++;
+    }
+
+    /* Honor peer's advertised receive window: peerRwnd is the free
+       buffer space the peer reports. If this message wouldn't fit, back
+       off and wait for a SACK to reopen the window. peerRwnd is updated
+       on every SACK (receiver's authoritative free-space reading) and
+       decremented locally below once we commit to sending, so we don't
+       over-send between SACKs. */
+    if ((uint64_t)dataLen > a->peerRwnd) {
+        a->myTsn -= (uint32_t)nFrags;
+        if (!unordered && ch && ch->ssn > 0) ch->ssn--;
+        return 0;
+    }
+
+    /* Insert into rexmit pool if this channel wants retransmission */
+    bool wantRexmit = reliableInfinite || maxRexmit > 0;
+    if (wantRexmit) {
+        int slot = rexmitInsert(a, streamId, ppid, ssn, priority, !unordered,
+                                reliableInfinite, maxRexmit,
+                                firstTsn, lastTsn, data, dataLen);
+        if (slot < 0 && reliableInfinite) {
+            /* Quota full at this priority — back off. Higher-priority sends
+               can still insert because their quota is larger. */
+            a->myTsn -= (uint32_t)nFrags;
+            if (!unordered && ch && ch->ssn > 0) ch->ssn--;
+            return 0;
+        }
+        /* For partial-reliable, losing the rexmit copy just drops reliability
+           for this message — not fatal; continue and send fire-and-forget. */
+    }
+
+    /* Account for this message in the peer's buffer — don't over-send
+       before the next SACK updates peerRwnd. SACK will snap us back to
+       the receiver's authoritative value when it arrives. */
+    if (a->peerRwnd >= dataLen) a->peerRwnd -= dataLen;
+    else a->peerRwnd = 0;
+
+    /* Fragment + send */
+    uint8_t pkt[12 + CHUNK_HDR + MAX_PAYLOAD + 4];
     int nPkts = 0;
     size_t sent = 0;
+    uint32_t tsn = firstTsn;
 
-    while (sent < dataLen || (sent == 0 && dataLen == 0)) {
+    while (sent < dataLen || (dataLen == 0 && nPkts == 0)) {
         size_t fragLen = dataLen - sent;
-        if (fragLen > maxData) fragLen = maxData;
+        if (fragLen > MAX_DATA) fragLen = MAX_DATA;
         bool first = (sent == 0);
-        bool last = (sent + fragLen >= dataLen);
+        bool last  = (sent + fragLen >= dataLen);
 
-        uint8_t flags = SCTP_DATA_U; /* unordered */
-        if (first) flags |= SCTP_DATA_B;
-        if (last)  flags |= SCTP_DATA_E | SCTP_DATA_I;
+        size_t pktLen = buildDataFragment(a, tsn, streamId, ssn, ppid,
+                                          unordered, first, last,
+                                          data + sent, fragLen, pkt);
 
-        uint32_t tsn = a->myTsn++;
-
-        /* Build packet on stack */
-        uint8_t pkt[12 + CHUNK_HDR + MAX_PAYLOAD + 4]; /* +4 for padding */
-        size_t pos = writeHeader(pkt, a->myPort, a->peerPort, a->peerTag);
-
-        size_t chunkStart = pos;
-        pkt[pos++] = SCTP_DATA;
-        pkt[pos++] = flags;
-        pos += 2; /* length placeholder */
-        w32(pkt + pos, tsn); pos += 4;             /* TSN */
-        w16(pkt + pos, streamId); pos += 2;        /* Stream ID */
-        w16(pkt + pos, 0); pos += 2;               /* SSN (0 for unordered) */
-        w32(pkt + pos, ppid); pos += 4;            /* PPID */
-        memcpy(pkt + pos, data + sent, fragLen);
-        pos += fragLen;
-
-        /* Patch chunk length (actual, not padded) */
-        w16(pkt + chunkStart + 2, (uint16_t)(pos - chunkStart));
-
-        /* Pad to 4-byte boundary */
-        while (pos % 4) pkt[pos++] = 0;
-
-        sctpSetChecksum(pkt, pos);
-
-        /* Save to retransmit buffer if channel has reliability */
-        if (maxRexmit > 0) {
-            int slot = a->rexmitHead;
-            a->rexmitHead = (slot + 1) % SCTP_REXMIT_SLOTS;
-            auto& e = a->rexmit[slot];
-            if (e.data) free(e.data);  /* evict oldest */
-            e.data = (uint8_t*)heap_caps_malloc(pos, MALLOC_CAP_SPIRAM);
-            if (e.data) {
-                memcpy(e.data, pkt, pos);
-                e.len = (uint16_t)pos;
-                e.tsn = tsn;
-                e.streamId = streamId;
-                e.maxRexmit = maxRexmit;
-                e.rexmitCount = 0;
+        int ret = sendFn(pkt, pktLen, ctx);
+        if (ret == 0) {
+            /* WANT_WRITE — yield + retry, same packet */
+            for (int attempt = 0; attempt < 5 && ret == 0; attempt++) {
+                vTaskDelay(1);
+                ret = sendFn(pkt, pktLen, ctx);
             }
         }
-
-        int ret = sendFn(pkt, pos, ctx);
-        if (ret == 0) {
-            /* WANT_WRITE — retry once after yielding */
-            vTaskDelay(1);
-            ret = sendFn(pkt, pos, ctx);
+        if (ret <= 0) {
+            /* Give up for now — stored message (if reliable) will retransmit
+               missing fragments on SACK gap. */
+            return nPkts > 0 ? nPkts : -1;
         }
-        if (ret <= 0) return nPkts > 0 ? nPkts : -1;
 
         sent += fragLen;
+        tsn++;
         nPkts++;
-
-        if (dataLen == 0) break; /* empty message */
+        if (dataLen == 0) break;
     }
 
     return nPkts;
 }
 
+int sctpStreamReset(sctp_assoc_t* a, uint16_t streamId,
+                    sctp_send_fn sendFn, void* ctx) {
+    if (!a->established) return -1;
+
+    /* Mark channel closed locally so further sctpSend on it no-ops.
+       Purge any rexmit entries — the peer drops the stream on our reset,
+       so retransmitting its TSNs is pointless and pins pool space. */
+    for (int i = 0; i < a->numChannels; i++) {
+        if (a->channels[i].open && a->channels[i].streamId == streamId) {
+            a->channels[i].open = false;
+            break;
+        }
+    }
+    rexmitPurgeStream(a, streamId);
+
+    size_t pktLen = buildReconfigOutReset(a, streamId, ++a->myReconfigReqSn, a->outBuf);
+    int ret = sendFn(a->outBuf, pktLen, ctx);
+    if (ret == 0) {
+        vTaskDelay(1);
+        ret = sendFn(a->outBuf, pktLen, ctx);
+    }
+    return ret > 0 ? 1 : -1;
+}
+
 int sctpFindChannel(sctp_assoc_t* a, const char* label) {
     for (int i = 0; i < a->numChannels; i++)
-        if (strcmp(a->channels[i].label, label) == 0) return i;
+        if (a->channels[i].open && strcmp(a->channels[i].label, label) == 0) return i;
     return -1;
 }
 
-int sctpRetransmit(sctp_assoc_t* a, sctp_send_fn sendFn, void* ctx) {
-    if (!a->established || !a->sackHasGaps) return 0;
+int sctpFindChannelByStream(sctp_assoc_t* a, uint16_t streamId) {
+    for (int i = 0; i < a->numChannels; i++)
+        if (a->channels[i].open && a->channels[i].streamId == streamId) return i;
+    return -1;
+}
+
+int sctpRetransmit(sctp_assoc_t* a, sctp_send_fn sendFn, void* ctx, bool forceAll) {
+    if (!a->established) return 0;
+    if (!forceAll && !a->sackHasGaps) return 0;
     a->sackHasGaps = false;
     int count = 0;
-    for (int i = 0; i < SCTP_REXMIT_SLOTS; i++) {
-        auto& e = a->rexmit[i];
+
+    uint8_t pkt[12 + CHUNK_HDR + MAX_PAYLOAD + 4];
+
+    /* Cap the burst so a full-pool RTO retransmit (up to ~1 MB of ChaCha20
+       encryption) doesn't monopolize the core past the 5 s watchdog.
+       Unsent fragments roll over to the next RTO call. */
+    const int MAX_FRAGS_PER_CALL = 32;
+
+    for (int i = 0; i < SCTP_REXMIT_SLOTS && count < MAX_FRAGS_PER_CALL; i++) {
+        rexmit_msg_t& e = a->rexmit[i];
         if (!e.data) continue;
-        /* Skip if already acked */
-        int32_t diff = (int32_t)(e.tsn - a->sackCumTsn);
-        if (diff <= 0) { free(e.data); e.data = nullptr; continue; }
-        /* Retransmit if below max */
-        if (e.rexmitCount < e.maxRexmit) {
-            e.rexmitCount++;
-            dbg("rexmit TSN=%u stream=%u attempt=%u/%u\n",
-                 (unsigned)e.tsn, e.streamId, e.rexmitCount, e.maxRexmit);
-            sendFn(e.data, e.len, ctx);
-            count++;
-        } else {
-            /* Exhausted retransmits */
-            free(e.data); e.data = nullptr;
+
+        /* Fully covered by cumulative ack? */
+        if ((int32_t)(e.lastTsn - a->sackCumTsn) <= 0) { rexmitFreeSlot(a, i); continue; }
+
+        /* Retry budget exceeded? */
+        if (!e.reliableInfinite && e.rexmitCount >= e.maxRexmit) {
+            dbg("rexmit give up stream=%u firstTsn=%u\n",
+                e.streamId, (unsigned)e.firstTsn);
+            rexmitFreeSlot(a, i);
+            continue;
         }
+
+        /* Walk each fragment TSN past cumTsn and resend ONLY those the
+           peer hasn't covered by a Gap Ack Block. Stale gap info from a
+           now-old SACK is still more accurate than ignoring it — peer
+           won't acknowledge duplicate retransmits quickly and the link
+           wastes bandwidth. */
+        size_t nFrags = e.dataLen ? ((e.dataLen + MAX_DATA - 1) / MAX_DATA) : 1;
+        bool unordered = !e.ordered;
+        bool anySent = false;
+        for (size_t f = 0; f < nFrags && count < MAX_FRAGS_PER_CALL; f++) {
+            uint32_t tsn = e.firstTsn + (uint32_t)f;
+            if ((int32_t)(tsn - a->sackCumTsn) <= 0) continue;
+
+            /* Is this TSN covered by a Gap Ack Block? If so, peer has it. */
+            uint32_t offFromCum = tsn - a->sackCumTsn;
+            bool received = false;
+            for (uint16_t g = 0; g < a->sackNumGaps; g++) {
+                if (offFromCum >= a->sackGapStart[g] &&
+                    offFromCum <= a->sackGapEnd[g]) {
+                    received = true;
+                    break;
+                }
+            }
+            if (received) continue;
+
+            size_t off = f * MAX_DATA;
+            size_t fragLen = e.dataLen - off;
+            if (fragLen > MAX_DATA) fragLen = MAX_DATA;
+            bool first = (f == 0);
+            bool last  = (f == nFrags - 1) || (e.dataLen == 0);
+
+            size_t pktLen = buildDataFragment(a, tsn, e.streamId, e.ssn, e.ppid,
+                                              unordered, first, last,
+                                              e.data + off, fragLen, pkt);
+
+            int ret = sendFn(pkt, pktLen, ctx);
+            if (ret == 0) { vTaskDelay(1); ret = sendFn(pkt, pktLen, ctx); }
+            if (ret > 0) {
+                anySent = true;
+                count++;
+                /* Feed IDLE0 every few fragments — ChaCha20 encrypt +
+                   sendto in a tight loop can starve the watchdog feeder
+                   on core 0 otherwise. */
+                if ((count & 7) == 0) vTaskDelay(1);
+            }
+            else break;
+        }
+        if (anySent) e.rexmitCount++;
     }
     return count;
 }
@@ -633,7 +1059,8 @@ void sctpBuildForwardTsn(sctp_assoc_t* a, uint32_t newCumTsn, size_t* outLen) {
 
 void sctpRexmitFree(sctp_assoc_t* a) {
     for (int i = 0; i < SCTP_REXMIT_SLOTS; i++) {
-        if (a->rexmit[i].data) { free(a->rexmit[i].data); a->rexmit[i].data = nullptr; }
+        if (a->rexmit[i].data) rexmitFreeSlot(a, i);
     }
     a->rexmitHead = 0;
+    a->rexmitBytes = 0;
 }
