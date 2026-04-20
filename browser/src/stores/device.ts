@@ -247,7 +247,7 @@ export const useDeviceStore = defineStore('device', () => {
       if (!dc || dc.readyState !== 'open') return
       try { dc.send('{"ping":1}') } catch { /* ignore */ }
       if (Date.now() - lastRx > 30000) {
-        console.log('[epl] heartbeat timeout, nudging session reconnect')
+        console.log('[storage] heartbeat timeout, nudging session reconnect')
         session.connect()
       }
     }, 10000)

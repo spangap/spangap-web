@@ -1310,6 +1310,5 @@ void webrtcInit() {
     for (int i = 0; i < DC_MAX_CHANNELS; i++) dcMap[i].handle = -1;
     pmLockCreate(PM_NO_LIGHT_SLEEP, "webrtc", &webrtcLockLS);
     pmLockCreate(PM_CPU_FREQ_MAX,   "webrtc", &webrtcLockCPU);
-    xTaskCreatePinnedToCoreWithCaps(webrtcTaskFn, "webrtc", 12288, nullptr, 2,
-                                    &webrtcHandle, 0, MALLOC_CAP_SPIRAM);
+    webrtcHandle = spawnTask(webrtcTaskFn, "webrtc", 12288, nullptr, 2, 0);
 }

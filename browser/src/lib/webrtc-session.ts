@@ -2,7 +2,7 @@
  * webrtc-session — shared WebRTC peer connection to the device.
  *
  * Owns the signaling WebSocket (`/webrtc`) and a single RTCPeerConnection
- * that every data channel consumer (video, settings/epl, log, cli) opens
+ * that every data channel consumer (video, storage, log, cli) opens
  * channels on. One DTLS + one SCTP association for the whole browser tab.
  *
  * Single-session model: the device's /webrtc endpoint rejects a second
@@ -10,7 +10,7 @@
  * `?force=1`. An evicted client sees 4008. Both cases freeze the tab
  * until the user clicks a button — no auto-reconnect for either.
  */
-import { deviceWssBase } from './epl'
+import { deviceWssBase } from './device-url'
 import { ReconnectTimer } from './reconnect'
 
 export type SessionState =

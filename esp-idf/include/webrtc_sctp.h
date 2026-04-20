@@ -71,7 +71,7 @@
 #define DC_UNRELIABLE_TIMED_UNO  0x82  /* unordered, maxPacketLifeTime */
 
 /* Max concurrently-active DataChannels we track state for. Leaves room for
-   AV + V + A (streaming triple), plus future EPL / log / cli-over-DC. */
+   AV + V + A (streaming triple), plus storage / log / cli / play. */
 #define DC_MAX_CHANNELS     16
 
 /* Streams announced in SCTP INIT-ACK (OS / MIS). Must cover the total

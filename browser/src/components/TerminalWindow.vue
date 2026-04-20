@@ -109,8 +109,10 @@ function sendData(data: string) {
     return
   }
   sendBuf.push(data)
-  if (sendTimer) clearTimeout(sendTimer)
-  sendTimer = setTimeout(flushSend, ms)
+  /* Schedule a flush only if none pending — do NOT reset on each key. With
+   * reset semantics, sustained typing would push the flush out indefinitely
+   * and a DC reopen during that window would orphan the buffer. */
+  if (!sendTimer) sendTimer = setTimeout(flushSend, ms)
 }
 
 function createTerminal() {

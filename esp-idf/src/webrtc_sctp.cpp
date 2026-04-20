@@ -517,7 +517,7 @@ static void rexmitPurgeStream(sctp_assoc_t* a, uint16_t streamId) {
 
 /* Per-priority rexmit-pool high-water mark. Higher-priority channels can
    consume more of the pool; lower-priority ones are capped earlier so a
-   video flood never starves an audio or EPL burst. Thresholds chosen from
+   video flood never starves an audio or storage burst. Thresholds chosen from
    the four standard DCEP priority levels (128/256/512/1024) with gaps left
    on purpose for future intermediate classes. */
 static size_t rexmitQuota(uint16_t priority) {
