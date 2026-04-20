@@ -838,6 +838,9 @@ static int webrtcItsConnect(int handle, const void* data, size_t len) {
         webExtractCookie(hdr, hdrLen, "session", cookie, sizeof(cookie));
         if (authCheck(cookie).empty()) {
             wsSendClose(handle, WS_CLOSE_AUTH);
+            /* Let the net proxy flush the close frame before connFree
+               zaps the stream buffer on return -1. */
+            itsSendDrain(handle, 200);
             info("WS auth failed\n");
             return -1;
         }
@@ -851,16 +854,20 @@ static int webrtcItsConnect(int handle, const void* data, size_t len) {
         bool force = (forceStr[0] == '1');
         if (!force) {
             wsSendClose(handle, WS_CLOSE_BUSY);
+            /* Drain the send buffer so the 4409 close frame actually
+               reaches the browser. Without this, net's proxy sees
+               itsConnected=false after connFree and drops the bytes —
+               browser sees raw TCP close (code 1006) instead of 4409
+               and would auto-reconnect forever. */
+            itsSendDrain(handle, 200);
             info("BUSY — rejecting (active handle=%d)\n", itsHandle);
             return -1;
         }
-        /* Force takeover: tell the current session it was kicked, then
-           tear it down and promote the new handle. */
+        /* Force takeover: tell the current session it was kicked, flush
+           the close frame, then tear down and promote the new handle. */
         info("force takeover — evicting handle=%d\n", itsHandle);
         wsSendClose(itsHandle, WS_CLOSE_KICK);
-        /* Brief yield so the close frame reaches the wire before we rip
-           the connection. */
-        vTaskDelay(pdMS_TO_TICKS(50));
+        itsSendDrain(itsHandle, 200);
         int victim = itsHandle;
         itsHandle = -1;
         webrtcWsClient = false;
