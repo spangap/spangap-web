@@ -1,20 +1,29 @@
+/**
+ * device — reactive mirror of the device's config tree.
+ *
+ * Uses a `storage:1` DataChannel on the shared WebRTC session (see
+ * `lib/webrtc-session.ts`). The DC carries JSON merge-patches in both
+ * directions, one message per packet: on open the device sends a full
+ * dump; subsequent device changes arrive as coalesced patches. Browser
+ * writes are sent as nested JSON patches too.
+ */
 import { defineStore } from 'pinia'
 import { reactive, ref } from 'vue'
-import { deviceWssBase } from '../lib/epl'
-import { ReconnectTimer } from '../lib/reconnect'
+import { getSession } from '../lib/webrtc-session'
 
 export const useDeviceStore = defineStore('device', () => {
   const settings: Record<string, any> = reactive({})
   const connected = ref(false)
 
-  let ws: WebSocket | null = null
-  const reconnect = new ReconnectTimer()
+  const session = getSession()
+  let dc: RTCDataChannel | null = null
+  let unregisterBuilder: (() => void) | null = null
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
   let knownAssetId: number | null = null
   let lastRx = 0
   let reloading = false
   let clientInfoPushed = false
-  /** Keys set while WS was down; flushed on reconnect so record.* toggles reach the device. */
+  /** Keys set while DC was down; flushed on reconnect so record.* toggles reach the device. */
   const pendingSet = new Map<string, string | number>()
 
   /** Deep-merge src into dst. `null` means delete (key/subtree). Arrays replace. */
@@ -67,16 +76,9 @@ export const useDeviceStore = defineStore('device', () => {
     return root
   }
 
-  function wsUrl() {
-    return deviceWssBase() + '/epl'
-  }
-
   function reloadForNewAssets() {
     reloading = true
-    if (ws) {
-      ws.close()
-      ws = null
-    }
+    if (dc) { try { dc.close() } catch { /* */ } dc = null }
     fetch('/', { cache: 'no-store' })
       .catch(() => {})
       .finally(() => {
@@ -171,21 +173,19 @@ export const useDeviceStore = defineStore('device', () => {
               node[parts[parts.length - 1]] = posix
             }
             nested.updated = ghEtag
-            if (ws && ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ s: { time: { zones: nested } } }))
-              console.log(`[device] timezone zones updated (${Object.keys(flat).length} zones)`)
-            }
+            sendJson({ s: { time: { zones: nested } } })
+            console.log(`[device] timezone zones updated (${Object.keys(flat).length} zones)`)
           })
       })
       .catch(() => { /* offline — use existing zones */ })
   }
 
   function flushPendingSets() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (!dc || dc.readyState !== 'open') return
     const entries = [...pendingSet.entries()]
     for (const [path, val] of entries) {
       try {
-        ws.send(JSON.stringify(buildNested(path, val)))
+        dc.send(JSON.stringify(buildNested(path, val)))
         pendingSet.delete(path)
       } catch {
         /* keep in map */
@@ -193,80 +193,62 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
-  function connect() {
-    if (ws) return
-    const url = wsUrl()
+  /** Channel builder: called by the shared session each time it builds a
+   *  fresh PC, BEFORE createOffer. This guarantees `storage:1` is in the
+   *  SDP so the offer has an m=application line. */
+  function buildChannel(pc: RTCPeerConnection) {
+    if (dc) { try { dc.onclose = null; dc.close() } catch { /* */ } }
     try {
-      ws = new WebSocket(url)
-    } catch {
-      scheduleReconnect()
+      dc = pc.createDataChannel('storage:1', { ordered: true, protocol: '' })
+    } catch (e) {
+      console.error('[device] createDataChannel failed:', e)
+      dc = null
       return
     }
 
-    ws.onopen = () => {
+    dc.onopen = () => {
       connected.value = true
-      reconnect.reset()
       lastRx = Date.now()
       clientInfoPushed = false
       startHeartbeat()
       flushPendingSets()
       /* Full dump may arrive after open; re-flush so toggles like record.* win over stale merge. */
       setTimeout(() => flushPendingSets(), 300)
-      /* Playback selection is browser-local (Pinia playback store); the
-       * device has no persistent playback state to reset on reconnect. */
     }
 
-    ws.onmessage = (ev) => {
-      if (typeof ev.data !== 'string') return
+    dc.onmessage = (ev) => {
+      const text = typeof ev.data === 'string'
+        ? ev.data
+        : new TextDecoder().decode(ev.data instanceof ArrayBuffer ? ev.data : (ev.data as Uint8Array).buffer)
       lastRx = Date.now()
       try {
-        const json = JSON.parse(ev.data)
+        const json = JSON.parse(text)
         if (json.pong) return
         deepMerge(settings, json)
         checkBuildTime()
         pushClientInfo()
-      } catch {
-        /* ignore non-JSON */
-      }
+      } catch { /* ignore non-JSON */ }
     }
 
-    ws.onclose = (ev) => {
-      ws = null
+    dc.onclose = () => {
+      dc = null
       connected.value = false
       stopHeartbeat()
-      if (ev.code === 4401) return  /* auth failure — don't reconnect */
-      scheduleReconnect()
+      /* Session handles reconnect + BUSY/KICK state. buildChannel will
+         fire again on the next fresh PC. */
     }
 
-    ws.onerror = () => {}
-  }
-
-  function scheduleReconnect() {
-    if (reloading) return
-    reconnect.schedule(() => connect())
-  }
-
-  function forceReconnect() {
-    if (ws) {
-      ws.onclose = null
-      ws.onerror = null
-      try { ws.close() } catch {}
-      ws = null
-    }
-    connected.value = false
-    stopHeartbeat()
-    reconnect.reset()
-    scheduleReconnect()
+    dc.onerror = () => { /* onclose fires next */ }
   }
 
   function startHeartbeat() {
     stopHeartbeat()
     heartbeatTimer = setInterval(() => {
-      if (!ws || ws.readyState !== WebSocket.OPEN) { forceReconnect(); return }
-      try { ws.send('{"ping":1}') } catch { forceReconnect(); return }
+      if (!dc || dc.readyState !== 'open') return
+      try { dc.send('{"ping":1}') } catch { /* ignore */ }
       if (Date.now() - lastRx > 30000) {
-        console.log('[epl] heartbeat timeout, reconnecting')
-        forceReconnect()
+        console.log('[epl] heartbeat timeout, nudging session reconnect')
+        session.connect()
       }
     }, 10000)
   }
@@ -275,12 +257,17 @@ export const useDeviceStore = defineStore('device', () => {
     if (heartbeatTimer) { clearInterval(heartbeatTimer); heartbeatTimer = null }
   }
 
-  /* Phone sleep/wake: check WS health when page becomes visible.
-   * Brief delay lets the browser resume the socket before we judge it dead. */
+  function connect() {
+    if (unregisterBuilder) return  /* already attached */
+    unregisterBuilder = session.registerChannel(buildChannel)
+    session.connect()
+  }
+
+  /* Phone sleep/wake: nudge the session when the tab becomes visible. */
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && !reloading) {
       setTimeout(() => {
-        if (!ws || ws.readyState !== WebSocket.OPEN) forceReconnect()
+        if (!dc || dc.readyState !== 'open') session.connect()
       }, 2000)
     }
   })
@@ -297,9 +284,9 @@ export const useDeviceStore = defineStore('device', () => {
     obj[parts[parts.length - 1]] = val
 
     pendingSet.set(path, val)
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (dc && dc.readyState === 'open') {
       try {
-        ws.send(JSON.stringify(buildNested(path, val)))
+        dc.send(JSON.stringify(buildNested(path, val)))
         pendingSet.delete(path)
       } catch {
         /* leave in pendingSet */
@@ -312,28 +299,24 @@ export const useDeviceStore = defineStore('device', () => {
    *  (e.g., replacing an entire array). */
   function sendJson(obj: Record<string, any>) {
     deepMerge(settings, obj)
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify(obj)) } catch { /* */ }
+    if (dc && dc.readyState === 'open') {
+      try { dc.send(JSON.stringify(obj)) } catch { /* */ }
     }
   }
 
   /** Force immediate settings write on device. */
   function save() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send('{"save":1}')
-    }
+    if (dc && dc.readyState === 'open') dc.send('{"save":1}')
   }
-
-  /* Do not auto-connect — MainLayout calls connect() after auth check */
 
   /* Flush pending settings + clean close on page unload */
   window.addEventListener('beforeunload', () => {
     reloading = true  /* suppress reconnect */
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send('{"save":1}')
-      ws.close()
+    if (dc && dc.readyState === 'open') {
+      try { dc.send('{"save":1}') } catch { /* */ }
+      try { dc.close() } catch { /* */ }
     }
-    ws = null
+    dc = null
   })
 
   return { settings, connected, get, set, sendJson, save, connect }

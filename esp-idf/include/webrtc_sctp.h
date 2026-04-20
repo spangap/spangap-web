@@ -98,6 +98,13 @@ typedef struct {
     char     label[32];
     char     protocol[256];
     uint16_t protoLen;
+    /* Inbound fragment reassembly (PSRAM, grown on demand, freed on E=1).
+       A DC message from the peer may span multiple DATA chunks with same
+       SSN and B=1…E=1 flags; we accumulate into rxBuf then fire onData. */
+    uint8_t* rxBuf;
+    size_t   rxLen;
+    size_t   rxCap;
+    uint32_t rxPpid;
 } dc_channel_t;
 
 /* ---- Rexmit entry: whole DCEP message ---- */
@@ -119,6 +126,11 @@ typedef struct {
 struct sctp_assoc_s;
 typedef void (*sctp_dceopen_cb_t)(struct sctp_assoc_s* a, int chIdx);
 typedef void (*sctp_dcreset_cb_t)(struct sctp_assoc_s* a, uint16_t streamId);
+/** Fired per fully-reassembled inbound DATA message (one user-level
+ *  message, after fragment reassembly). PPID tells the caller whether
+ *  the payload is a string (51) or binary (53). */
+typedef void (*sctp_data_cb_t)(struct sctp_assoc_s* a, uint16_t streamId,
+                                uint32_t ppid, const uint8_t* data, size_t dataLen);
 
 /* ---- SCTP association state ---- */
 typedef struct sctp_assoc_s {
@@ -142,6 +154,7 @@ typedef struct sctp_assoc_s {
     /* Callbacks (optional — nullptr is fine) */
     sctp_dceopen_cb_t onDceopen;
     sctp_dcreset_cb_t onDcreset;
+    sctp_data_cb_t    onData;
 
     /* Retransmit buffer (whole-message entries in PSRAM) */
     rexmit_msg_t rexmit[SCTP_REXMIT_SLOTS];

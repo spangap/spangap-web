@@ -23,17 +23,23 @@
 import { ref, watch, onMounted, onUnmounted, nextTick, computed } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { deviceWssBase } from '../lib/epl'
+import { getSession } from '../lib/webrtc-session'
 import FloatingWindow from './FloatingWindow.vue'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
   visible: boolean
   title: string
-  endpoint: string
+  /** DataChannel label to open on the shared session (e.g. `cli:1`, `log:1`). */
+  dcLabel: string
+  /** DCEP protocol string — used by `log:1` to request a custom backlog size
+   *  like `{"backlog":65536}`. Leave empty for default. */
+  dcProtocol?: string
   readonly?: boolean
   configPrefix: string   // 'cli' or 'log' — window id + localStorage namespace
-  backlogBytes?: number  // only meaningful for readonly log endpoint
+  /** CLI input: coalesce keystrokes within this many ms into one DC message.
+   *  0 = send each keystroke immediately. Default 50ms per the device plan. */
+  coalesceMs?: number
 }>()
 
 const emit = defineEmits<{
@@ -73,16 +79,39 @@ function zoomOut() {
 const fwRef = ref<InstanceType<typeof FloatingWindow>>()
 const termRef = ref<HTMLElement>()
 
-/* ── terminal + WS ── */
+/* ── terminal + DC ── */
 let term: Terminal | null = null
 let fitAddon: FitAddon | null = null
-let ws: WebSocket | null = null
+let dc: RTCDataChannel | null = null
 let resizeObserver: ResizeObserver | null = null
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-let reconnectDelay = 1000
+let unregisterBuilder: (() => void) | null = null
 let wasConnected = false
-let shouldReconnect = false
 let atBottom = true
+
+/* CLI keystroke coalescing: accumulate inputs for N ms, flush as one DC
+   message. Matches the device's packet-mode semantics. */
+let sendBuf: string[] = []
+let sendTimer: ReturnType<typeof setTimeout> | null = null
+function flushSend() {
+  if (sendTimer) { clearTimeout(sendTimer); sendTimer = null }
+  if (sendBuf.length === 0) return
+  if (dc && dc.readyState === 'open') {
+    try { dc.send(sendBuf.join('')) } catch { /* drop if DC died */ }
+  }
+  sendBuf = []
+}
+function sendData(data: string) {
+  const ms = props.coalesceMs ?? 50
+  if (ms <= 0) {
+    if (dc && dc.readyState === 'open') {
+      try { dc.send(data) } catch { /* */ }
+    }
+    return
+  }
+  sendBuf.push(data)
+  if (sendTimer) clearTimeout(sendTimer)
+  sendTimer = setTimeout(flushSend, ms)
+}
 
 function createTerminal() {
   if (term || !termRef.value) return
@@ -112,9 +141,7 @@ function createTerminal() {
   })
 
   if (!props.readonly) {
-    term.onData((data: string) => {
-      if (ws?.readyState === WebSocket.OPEN) ws.send(data)
-    })
+    term.onData((data: string) => sendData(data))
   }
 
   resizeObserver = new ResizeObserver(() => fitAddon?.fit())
@@ -129,39 +156,24 @@ function destroyTerminal() {
   fitAddon = null
 }
 
-function scheduleReconnect() {
-  if (!shouldReconnect || reconnectTimer) return
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null
-    if (shouldReconnect) connectWs()
-  }, reconnectDelay)
-  reconnectDelay = Math.min(reconnectDelay * 2, 5000)
-}
-
-function wsUrl(): string {
-  let url = `${deviceWssBase()}${props.endpoint}`
-  /* Backlog only on first connect — reconnects pick up live from here. */
-  if (!wasConnected && props.backlogBytes && props.backlogBytes > 0) {
-    const sep = url.includes('?') ? '&' : '?'
-    url += `${sep}backlog=${props.backlogBytes}`
-  }
-  return url
-}
-
-function connectWs() {
-  if (ws) return
-  shouldReconnect = true
+/** Channel builder: called by the shared session on every fresh PC,
+ *  BEFORE createOffer. Ensures our `log:1` / `cli:1` DC ships with the
+ *  offer SDP's m=application line. */
+function buildChannel(pc: RTCPeerConnection) {
+  if (dc) { try { dc.onclose = null; dc.close() } catch { /* */ } }
   try {
-    ws = new WebSocket(wsUrl())
-  } catch {
-    ws = null
-    scheduleReconnect()
+    dc = pc.createDataChannel(props.dcLabel, {
+      ordered: true,
+      protocol: props.dcProtocol ?? '',
+    })
+  } catch (e) {
+    console.error(`[${props.configPrefix}] createDataChannel failed:`, e)
+    dc = null
     return
   }
-  ws.binaryType = 'arraybuffer'
-  ws.onopen = () => {
+  dc.binaryType = 'arraybuffer'
+  dc.onopen = () => {
     atBottom = true
-    reconnectDelay = 1000
     if (wasConnected) {
       term?.writeln('\r\n\x1b[32m── reconnected ──\x1b[0m')
     } else {
@@ -169,36 +181,51 @@ function connectWs() {
     }
     wasConnected = true
   }
-  ws.onmessage = (ev) => {
+  dc.onmessage = (ev) => {
     if (!term) return
-    term.write(typeof ev.data === 'string' ? ev.data : new TextDecoder().decode(ev.data))
+    const text = typeof ev.data === 'string'
+      ? ev.data
+      : new TextDecoder().decode(ev.data instanceof ArrayBuffer
+          ? ev.data
+          : (ev.data as Uint8Array).buffer)
+    term.write(text)
     const buf = term.buffer.active
     atBottom = buf.viewportY >= buf.baseY
     if (!atBottom) fwRef.value?.flashTitleBar()
   }
-  ws.onclose = () => {
-    ws = null
-    if (wasConnected && shouldReconnect) {
-      term?.writeln('\r\n\x1b[31m── connection lost, reconnecting… ──\x1b[0m')
+  dc.onclose = () => {
+    dc = null
+    if (wasConnected) {
+      term?.writeln('\r\n\x1b[31m── channel closed ──\x1b[0m')
     }
-    scheduleReconnect()
   }
-  ws.onerror = () => { try { ws?.close() } catch { /* ignore */ } }
+  dc.onerror = () => { /* onclose follows */ }
 }
 
-function disconnectWs() {
-  shouldReconnect = false
-  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
-  if (ws) { ws.onclose = null; try { ws.close() } catch { /* ignore */ } ws = null }
+function attachSession() {
+  if (unregisterBuilder) return
+  unregisterBuilder = getSession().registerChannel(buildChannel)
+  getSession().connect()
+}
+
+function detachSession() {
+  if (unregisterBuilder) { unregisterBuilder(); unregisterBuilder = null }
+  flushSend()
+  if (dc) {
+    const d = dc
+    dc = null
+    d.onclose = null
+    d.onmessage = null
+    try { d.close() } catch { /* */ }
+  }
   wasConnected = false
-  reconnectDelay = 1000
 }
 
 /* ── lifecycle ── */
 
 function showWindow() {
   createTerminal()
-  connectWs()
+  attachSession()
   setTimeout(() => {
     fitAddon?.fit()
     if (!props.readonly) term?.focus()
@@ -207,7 +234,7 @@ function showWindow() {
 
 watch(() => props.visible, (vis) => {
   if (vis) nextTick(showWindow)
-  else { disconnectWs(); destroyTerminal() }
+  else { detachSession(); destroyTerminal() }
 })
 
 onMounted(() => {
@@ -215,7 +242,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
-  disconnectWs()
+  detachSession()
   destroyTerminal()
 })
 </script>

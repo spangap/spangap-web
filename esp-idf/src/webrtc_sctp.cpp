@@ -331,10 +331,16 @@ static void handleReconfigChunk(sctp_assoc_t* a, const uint8_t* chunk, size_t ch
             while (idsOff + 2 <= idsEnd) {
                 uint16_t sid = r16(chunk + idsOff);
                 idsOff += 2;
-                /* Mark channel closed, purge its rexmit data, fire callback */
+                /* Mark channel closed, purge its rexmit data, free any
+                   in-flight inbound reassembly buffer, fire callback */
                 for (int i = 0; i < a->numChannels; i++) {
                     if (a->channels[i].open && a->channels[i].streamId == sid) {
                         a->channels[i].open = false;
+                        if (a->channels[i].rxBuf) {
+                            heap_caps_free(a->channels[i].rxBuf);
+                            a->channels[i].rxBuf = nullptr;
+                            a->channels[i].rxLen = a->channels[i].rxCap = 0;
+                        }
                         rexmitPurgeStream(a, sid);
                         if (a->onDcreset) a->onDcreset(a, sid);
                         dbg("DC stream %u closed via RE-CONFIG\n", sid);
@@ -597,13 +603,84 @@ static size_t buildDataFragment(sctp_assoc_t* a, uint32_t tsn, uint16_t streamId
 
 /* ---- Process incoming DATA chunk ---- */
 
+/** Reassemble inbound DATA fragments per channel. Browser fragments any
+ *  dc.send() larger than MAX_PAYLOAD (1400B) into multiple DATA chunks
+ *  with B=1 on the first and E=1 on the last; ordered channels arrive in
+ *  TSN order thanks to SCTP's cumulative TSN semantics. We accumulate
+ *  into the channel's rxBuf and fire onData once E=1 lands. PSRAM,
+ *  capped at 64KB per message (matches SDP max-message-size). */
+static void processDataFragment(sctp_assoc_t* a, uint16_t streamId,
+                                uint32_t ppid, uint8_t flags,
+                                const uint8_t* data, size_t dataLen) {
+    int chIdx = sctpFindChannelByStream(a, streamId);
+    if (chIdx < 0) return;  /* unknown stream — ignore */
+    dc_channel_t* c = &a->channels[chIdx];
+
+    bool beginning = (flags & SCTP_DATA_B) != 0;
+    bool end       = (flags & SCTP_DATA_E) != 0;
+
+    /* Fast path: whole message in one chunk — no alloc. */
+    if (beginning && end) {
+        if (a->onData) a->onData(a, streamId, ppid, data, dataLen);
+        return;
+    }
+
+    if (beginning) {
+        /* Start a fresh reassembly buffer. Drop any orphan from a prior
+           incomplete message on this stream (shouldn't happen with
+           ordered delivery, but defensive). */
+        if (c->rxBuf) { heap_caps_free(c->rxBuf); c->rxBuf = nullptr; }
+        c->rxCap = dataLen < 4096 ? 4096 : dataLen * 2;
+        c->rxBuf = (uint8_t*)heap_caps_malloc(c->rxCap, MALLOC_CAP_SPIRAM);
+        c->rxLen = 0;
+        c->rxPpid = ppid;
+    }
+    if (!c->rxBuf) return;  /* alloc failed or orphan continuation */
+
+    /* Grow buffer if this fragment would overflow. Cap at 64KB. */
+    constexpr size_t MAX_MESSAGE = 65536;
+    if (c->rxLen + dataLen > c->rxCap) {
+        size_t newCap = c->rxCap;
+        while (newCap < c->rxLen + dataLen) newCap *= 2;
+        if (newCap > MAX_MESSAGE) newCap = MAX_MESSAGE;
+        if (c->rxLen + dataLen > newCap) {
+            warn("SCTP reassembly overflow on stream %u (>%u) — dropping\n",
+                 (unsigned)streamId, (unsigned)MAX_MESSAGE);
+            heap_caps_free(c->rxBuf);
+            c->rxBuf = nullptr;
+            c->rxLen = c->rxCap = 0;
+            return;
+        }
+        uint8_t* nb = (uint8_t*)heap_caps_realloc(c->rxBuf, newCap, MALLOC_CAP_SPIRAM);
+        if (!nb) {
+            heap_caps_free(c->rxBuf);
+            c->rxBuf = nullptr;
+            c->rxLen = c->rxCap = 0;
+            return;
+        }
+        c->rxBuf = nb;
+        c->rxCap = newCap;
+    }
+
+    memcpy(c->rxBuf + c->rxLen, data, dataLen);
+    c->rxLen += dataLen;
+
+    if (end) {
+        if (a->onData) a->onData(a, streamId, c->rxPpid, c->rxBuf, c->rxLen);
+        heap_caps_free(c->rxBuf);
+        c->rxBuf = nullptr;
+        c->rxLen = c->rxCap = 0;
+    }
+}
+
 static size_t processDataChunk(sctp_assoc_t* a, const uint8_t* chunk, size_t chunkLen,
                                uint8_t* out, size_t outSize) {
     if (chunkLen < 16) return 0;
 
-    uint32_t tsn = r32(chunk + 4);
+    uint8_t  flags    = chunk[1];
+    uint32_t tsn      = r32(chunk + 4);
     uint16_t streamId = r16(chunk + 8);
-    uint32_t ppid = r32(chunk + 12);
+    uint32_t ppid     = r32(chunk + 12);
     const uint8_t* data = chunk + 16;
     size_t dataLen = chunkLen - 16;
     uint16_t realChunkLen = r16(chunk + 2);
@@ -616,8 +693,10 @@ static size_t processDataChunk(sctp_assoc_t* a, const uint8_t* chunk, size_t chu
 
     if (ppid == PPID_DCEP && dataLen > 0 && data[0] == DCEP_OPEN) {
         outLen = handleDcepOpen(a, streamId, data, dataLen, out);
+    } else if (ppid != PPID_DCEP) {
+        /* User data — forward to onData with per-stream reassembly. */
+        processDataFragment(a, streamId, ppid, flags, data, dataLen);
     }
-    /* Other PPIDs: inbound user data → handled by caller via onData (future). */
 
     return outLen;
 }
@@ -628,13 +707,22 @@ void sctpInit(sctp_assoc_t* a, uint8_t* outBuf, size_t outBufSize, uint16_t sctp
     /* Keep callbacks across init (caller may have registered before we ran). */
     sctp_dceopen_cb_t saveOpen = a->onDceopen;
     sctp_dcreset_cb_t saveReset = a->onDcreset;
+    sctp_data_cb_t    saveData  = a->onData;
     sctpRexmitFree(a);
+    /* Free any in-flight inbound reassembly buffers before zeroing. */
+    for (int i = 0; i < a->numChannels; i++) {
+        if (a->channels[i].rxBuf) {
+            heap_caps_free(a->channels[i].rxBuf);
+            a->channels[i].rxBuf = nullptr;
+        }
+    }
     memset(a, 0, sizeof(*a));
     a->outBuf = outBuf;
     a->outBufSize = outBufSize;
     a->myPort = sctpPort;
     a->onDceopen = saveOpen;
     a->onDcreset = saveReset;
+    a->onData    = saveData;
     esp_fill_random(a->cookieSecret, sizeof(a->cookieSecret));
 }
 
@@ -775,12 +863,16 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
                         if (causeLen < 4) break;
                         cOff += pad4(causeLen);
                     }
-                    /* Fire onDcreset for every open channel before teardown. */
-                    if (a->onDcreset) {
-                        for (int i = 0; i < a->numChannels; i++) {
-                            if (a->channels[i].open)
-                                a->onDcreset(a, a->channels[i].streamId);
-                            a->channels[i].open = false;
+                    /* Fire onDcreset for every open channel before teardown,
+                       and free any inbound reassembly buffers. */
+                    for (int i = 0; i < a->numChannels; i++) {
+                        if (a->channels[i].open && a->onDcreset)
+                            a->onDcreset(a, a->channels[i].streamId);
+                        a->channels[i].open = false;
+                        if (a->channels[i].rxBuf) {
+                            heap_caps_free(a->channels[i].rxBuf);
+                            a->channels[i].rxBuf = nullptr;
+                            a->channels[i].rxLen = a->channels[i].rxCap = 0;
                         }
                     }
                     a->established = false;

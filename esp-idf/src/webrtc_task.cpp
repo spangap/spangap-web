@@ -198,12 +198,6 @@ static int dcMapFindByStream(uint16_t streamId) {
     return -1;
 }
 
-static int dcMapFindByHandle(int handle) {
-    for (int i = 0; i < DC_MAX_CHANNELS; i++)
-        if (dcMap[i].handle == handle) return i;
-    return -1;
-}
-
 static int dcMapAllocSlot() {
     for (int i = 0; i < DC_MAX_CHANNELS; i++)
         if (dcMap[i].handle < 0) return i;
@@ -778,50 +772,125 @@ static void webrtcDcReset(sctp_assoc_t* a, uint16_t streamId) {
     info("DC stream %u closed by peer\n", streamId);
 }
 
+/* SCTP inbound user-data (fully reassembled): route to the paired ITS
+   handle as one packet-mode itsSend. PPID distinguishes string/binary
+   but the target task sees the bytes regardless. */
+static void webrtcDcData(sctp_assoc_t* a, uint16_t streamId,
+                          uint32_t ppid, const uint8_t* data, size_t dataLen) {
+    (void)a; (void)ppid;
+    int idx = dcMapFindByStream(streamId);
+    if (idx < 0) return;
+    int h = dcMap[idx].handle;
+    if (h < 0) return;
+    /* Short timeout: don't stall the webrtc main loop if the target's
+       buffer is briefly full. Browser's SCTP will slow down naturally
+       via the rwnd / SACK feedback loop if we stop draining. */
+    size_t sent = itsSend(h, data, dataLen, pdMS_TO_TICKS(50));
+    if (sent == 0) {
+        warn("DC→ITS drop: stream=%u len=%u (target buffer full)\n",
+             (unsigned)streamId, (unsigned)dataLen);
+    }
+}
+
 /* ---- Signaling WS (ITS server for web-forwarded connections) ---- */
 
-static int webrtcItsConnect(int handle, const void* data, size_t len) {
-    if (itsHandle >= 0) itsDisconnect(itsHandle);
-    itsHandle = handle;
-    webrtcWsClient = false;
-    if (len >= sizeof(net_connect_t) && ((const net_connect_t*)data)->ws) {
-        char hdr[1024];
-        int hdrLen = webGetHeader(handle, hdr, sizeof(hdr));
-        if (hdrLen <= 0) { info("no headers\n"); return -1; }
-        if (!wsUpgrade(handle, hdr, hdrLen)) { info("WS upgrade failed\n"); return -1; }
-        if (authEnabled()) {
-            char cookie[64] = {};
-            webExtractCookie(hdr, hdrLen, "session", cookie, sizeof(cookie));
-            if (authCheck(cookie).empty()) {
-                wsSendClose(handle, 4401);
-                info("WS auth failed\n");
-                return -1;
-            }
-        }
-        webrtcWsClient = true;
-    }
-    info("signaling client connected%s\n", webrtcWsClient ? " (WS)" : "");
-    return 0;
-}
+/** WS close codes. 4xxx are application-defined (per RFC 6455 §7.4.2).
+ *    4401 — auth required / cookie invalid (matches other endpoints).
+ *    4409 — device busy (another session active). Client may retry with
+ *           `?force=1` to evict.
+ *    4008 — evicted by another session (served to the victim on force). */
+enum : uint16_t {
+    WS_CLOSE_AUTH  = 4401,
+    WS_CLOSE_BUSY  = 4409,
+    WS_CLOSE_KICK  = 4008,
+};
 
-static bool webrtcItsBusy(const void* data, size_t len) {
-    (void)data; (void)len;
-    if (itsHandle >= 0) itsDisconnect(itsHandle);
-    return false;
-}
+/* Port is opened with maxHandles=2 so a new connect always lands in
+   onConnect (not onBusy) where we can do WS upgrade + wsSendClose with a
+   specific code. The second slot is transient: we either reject (4409)
+   or promote (evicting the first). A 3rd simultaneous attempt hits
+   onBusy and is rejected without a coded close — rare enough to ignore. */
 
-static void webrtcItsDisconnect(int ref) {
-    (void)ref;
-    itsHandle = -1;
-    webrtcWsClient = false;
-    info("signaling client disconnected\n");
-    /* Browser gone → tear the association down so no more packets flow and
-       any mapped ITS connections are closed. */
+static void webrtcSessionTeardown() {
     dcMapClearAll();
     if (dtlsSessionActive) dtlsSessionFree();
     peerKnown = false;
     lastUdpRxMs = 0;
     sctpInit(&sctp, sctpBuf, sizeof(sctpBuf), SCTP_PORT);
+}
+
+static int webrtcItsConnect(int handle, const void* data, size_t len) {
+    /* Require WS (signaling has no meaningful raw-TCP use). */
+    if (len < sizeof(net_connect_t) || !((const net_connect_t*)data)->ws) {
+        warn("non-WS connect rejected\n");
+        return -1;
+    }
+
+    char hdr[1024];
+    int hdrLen = webGetHeader(handle, hdr, sizeof(hdr));
+    if (hdrLen <= 0) { info("no headers\n"); return -1; }
+    if (!wsUpgrade(handle, hdr, hdrLen)) { info("WS upgrade failed\n"); return -1; }
+
+    /* Auth check — always first, so `?force=1` can never be evaluated
+       without a valid session cookie. */
+    if (authEnabled()) {
+        char cookie[64] = {};
+        webExtractCookie(hdr, hdrLen, "session", cookie, sizeof(cookie));
+        if (authCheck(cookie).empty()) {
+            wsSendClose(handle, WS_CLOSE_AUTH);
+            info("WS auth failed\n");
+            return -1;
+        }
+    }
+
+    /* Single-session: if another session is active, reject with BUSY
+       unless client explicitly opted into eviction with ?force=1. */
+    if (itsHandle >= 0 && itsHandle != handle) {
+        char forceStr[8] = {};
+        webGetQuery(hdr, hdrLen, "force", forceStr, sizeof(forceStr));
+        bool force = (forceStr[0] == '1');
+        if (!force) {
+            wsSendClose(handle, WS_CLOSE_BUSY);
+            info("BUSY — rejecting (active handle=%d)\n", itsHandle);
+            return -1;
+        }
+        /* Force takeover: tell the current session it was kicked, then
+           tear it down and promote the new handle. */
+        info("force takeover — evicting handle=%d\n", itsHandle);
+        wsSendClose(itsHandle, WS_CLOSE_KICK);
+        /* Brief yield so the close frame reaches the wire before we rip
+           the connection. */
+        vTaskDelay(pdMS_TO_TICKS(50));
+        int victim = itsHandle;
+        itsHandle = -1;
+        webrtcWsClient = false;
+        itsDisconnect(victim);
+        webrtcSessionTeardown();
+    }
+
+    itsHandle = handle;
+    webrtcWsClient = true;
+    info("signaling client connected\n");
+    return 0;
+}
+
+static bool webrtcItsBusy(const void* data, size_t len) {
+    (void)data; (void)len;
+    /* Slots 0 and 1 are both in flight. A third attempt got here — just
+       reject. The client sees a raw WS close without a code (1006). */
+    return true;
+}
+
+static void webrtcItsDisconnect(int ref) {
+    (void)ref;
+    /* Only tear down if the disconnecting handle is the current active
+       session. Rejected secondary connects (BUSY/AUTH) don't match and
+       don't touch the running session. */
+    if (itsHandle < 0) return;
+    itsHandle = -1;
+    webrtcWsClient = false;
+    info("signaling client disconnected\n");
+    webrtcSessionTeardown();
 }
 
 /* ---- Signaling message handling ---- */
@@ -890,6 +959,7 @@ static void handleSignalingMsg(const char* msg, size_t len) {
     sctpInit(&sctp, sctpBuf, sizeof(sctpBuf), SCTP_PORT);
     sctp.onDceopen = webrtcDcOpen;
     sctp.onDcreset = webrtcDcReset;
+    sctp.onData    = webrtcDcData;
     peerKnown = false;
     lastHandshakeLen = 0;
     dbg("sent SDP answer, waiting for ICE+DTLS\n");
@@ -973,6 +1043,7 @@ static void handleUdpPacket(const uint8_t* buf, size_t n,
                 sctpInit(&sctp, sctpBuf, sizeof(sctpBuf), SCTP_PORT);
                 sctp.onDceopen = webrtcDcOpen;
                 sctp.onDcreset = webrtcDcReset;
+                sctp.onData    = webrtcDcData;
                 lastUdpRxMs = 0;
             } else if (outLen > 0) {
                 int wr = dtlsSctpSend(sctp.outBuf, outLen, nullptr);
@@ -990,6 +1061,7 @@ static void handleUdpPacket(const uint8_t* buf, size_t n,
             sctpInit(&sctp, sctpBuf, sizeof(sctpBuf), SCTP_PORT);
             sctp.onDceopen = webrtcDcOpen;
             sctp.onDcreset = webrtcDcReset;
+            sctp.onData    = webrtcDcData;
             peerKnown = false;
         }
     }
@@ -1025,7 +1097,10 @@ static void webrtcTaskFn(void*) {
        to content tasks (live, play, …). */
     itsServerInit();
     itsClientInit(DC_MAX_CHANNELS);
-    itsServerPortOpen(WEBRTC_PORT, false, 1, 4096, 4096);
+    /* maxHandles=2: lets a second connect run through onConnect so we can
+       do WS upgrade + wsSendClose(4409) or evict-on-force. At most one
+       of the two slots is the "active" session at any moment. */
+    itsServerPortOpen(WEBRTC_PORT, false, 2, 4096, 4096);
     itsServerOnConnect(WEBRTC_PORT, webrtcItsConnect);
     itsServerOnBusy(WEBRTC_PORT, webrtcItsBusy);
     itsServerOnDisconnect(WEBRTC_PORT, webrtcItsDisconnect);
@@ -1202,6 +1277,7 @@ static void webrtcTaskFn(void*) {
             sctpInit(&sctp, sctpBuf, sizeof(sctpBuf), SCTP_PORT);
             sctp.onDceopen = webrtcDcOpen;
             sctp.onDcreset = webrtcDcReset;
+            sctp.onData    = webrtcDcData;
             peerKnown = false;
             lastUdpRxMs = 0;
         }
