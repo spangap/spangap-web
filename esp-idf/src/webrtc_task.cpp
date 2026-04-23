@@ -453,7 +453,7 @@ static int tryReassembleClientHello(const uint8_t* pkt, size_t n) {
     memcpy(chReasmBuf + 25 + fragOff, pkt + 25, fragLen);
     chReasmFilled += fragLen;
     if (chReasmFilled >= chReasmBodyLen) {
-        info("DTLS: reassembled fragmented ClientHello (%u bytes)\n", (unsigned)chReasmLen);
+        dbg("DTLS: reassembled fragmented ClientHello (%u bytes)\n", (unsigned)chReasmLen);
         return 1;
     }
     return -1;
