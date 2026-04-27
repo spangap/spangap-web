@@ -26,7 +26,48 @@ export const useDeviceStore = defineStore('device', () => {
   /** Keys set while DC was down; flushed on reconnect so record.* toggles reach the device. */
   const pendingSet = new Map<string, string | number>()
 
-  /** Deep-merge src into dst. `null` means delete (key/subtree). Arrays replace. */
+  /** True if every key on `obj` is an unsigned-integer string. Empty objects
+   *  are not numeric-keyed for our purposes — they shouldn't trigger array
+   *  merge semantics. */
+  function isNumericKeyedObject(obj: any): boolean {
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return false
+    const keys = Object.keys(obj)
+    if (keys.length === 0) return false
+    return keys.every(k => /^\d+$/.test(k))
+  }
+
+  /** Merge a numeric-keyed-object patch into an existing array, element-wise.
+   *  Mirror of deepMergeIntoArray() in storage.cpp — without this, a patch
+   *  like {3:{pass:"x"}} arriving for an existing nets[] would replace the
+   *  whole array. */
+  function mergeIntoArray(dstArr: any[], patchObj: Record<string, any>) {
+    const deletions = Object.keys(patchObj)
+      .filter(k => patchObj[k] === null)
+      .map(k => parseInt(k, 10))
+      .sort((a, b) => b - a)
+    for (const idx of deletions)
+      if (idx >= 0 && idx < dstArr.length) dstArr.splice(idx, 1)
+
+    for (const k of Object.keys(patchObj)) {
+      const val = patchObj[k]
+      if (val === null) continue
+      const idx = parseInt(k, 10)
+      const dstElem = dstArr[idx]
+      if (val && typeof val === 'object' && !Array.isArray(val) &&
+          dstElem && typeof dstElem === 'object' && !Array.isArray(dstElem)) {
+        deepMerge(dstElem, val)
+      } else if (idx < dstArr.length) {
+        dstArr[idx] = val
+      } else {
+        while (dstArr.length < idx) dstArr.push(null)
+        dstArr.push(val)
+      }
+    }
+  }
+
+  /** Deep-merge src into dst. `null` means delete (key/subtree). Plain arrays
+   *  on src replace. Numeric-keyed objects merge element-wise into existing
+   *  arrays (so individual array element fields can be patched). */
   function deepMerge(dst: any, src: any) {
     for (const key of Object.keys(src)) {
       const val = src[key]
@@ -42,6 +83,10 @@ export const useDeviceStore = defineStore('device', () => {
       }
 
       if (val && typeof val === 'object') {
+        if (Array.isArray(dst[key]) && isNumericKeyedObject(val)) {
+          mergeIntoArray(dst[key], val)
+          continue
+        }
         if (!dst[key] || typeof dst[key] !== 'object' || Array.isArray(dst[key])) dst[key] = {}
         deepMerge(dst[key], val)
         continue
