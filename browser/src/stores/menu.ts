@@ -10,6 +10,8 @@ export interface MenuItem {
   key?: string                 // for type === 'toggle' (device store dotpath)
   children?: MenuItem[]        // for type === 'submenu'
   action?: () => void          // for type === 'action'
+  dynamicLabel?: () => string  // overrides `label` at render time when present
+  checked?: () => boolean      // shows a leading checkmark when truthy
 }
 
 export interface MenuGroup {
@@ -19,13 +21,14 @@ export interface MenuGroup {
   items: MenuItem[]
   activeLabel?: string      // label shown in menu bar when this panel is active
   onClose?: () => void      // called when active panel's menu button is clicked (to dismiss)
+  hidden?: () => boolean    // hides the entire group when truthy
 }
 
 export const useMenuStore = defineStore('menu', () => {
   const menus = reactive(new Map<string, MenuGroup>())
   const activePanel = ref<string | null>(null)
 
-  function register(menuId: string, label: string, order: number, items: MenuItem[], options?: { activeLabel?: string, onClose?: () => void }) {
+  function register(menuId: string, label: string, order: number, items: MenuItem[], options?: { activeLabel?: string, onClose?: () => void, hidden?: () => boolean }) {
     const existing = menus.get(menuId)
     if (existing) {
       existing.items.push(...items)
