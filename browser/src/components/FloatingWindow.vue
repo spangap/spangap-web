@@ -6,27 +6,27 @@
     :style="windowStyle"
     @mousedown="bringToFront"
   >
-    <!-- Resize handles (conditionally rendered) -->
+    <!-- Resize handles -->
     <template v-if="canResizeV || canResizeH">
-      <div v-if="canResizeV" class="fw-resize fw-resize-n" @mousedown.prevent="startResize('n', $event)" />
-      <div v-if="canResizeV" class="fw-resize fw-resize-s" @mousedown.prevent="startResize('s', $event)" />
-      <div v-if="canResizeH" class="fw-resize fw-resize-e" @mousedown.prevent="startResize('e', $event)" />
-      <div v-if="canResizeH" class="fw-resize fw-resize-w" @mousedown.prevent="startResize('w', $event)" />
-      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-ne" @mousedown.prevent="startResize('ne', $event)" />
-      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-nw" @mousedown.prevent="startResize('nw', $event)" />
-      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-se" @mousedown.prevent="startResize('se', $event)" />
-      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-sw" @mousedown.prevent="startResize('sw', $event)" />
+      <div v-if="canResizeV" class="fw-resize fw-resize-n" @pointerdown.prevent="startResize('n', $event)" />
+      <div v-if="canResizeV" class="fw-resize fw-resize-s" @pointerdown.prevent="startResize('s', $event)" />
+      <div v-if="canResizeH" class="fw-resize fw-resize-e" @pointerdown.prevent="startResize('e', $event)" />
+      <div v-if="canResizeH" class="fw-resize fw-resize-w" @pointerdown.prevent="startResize('w', $event)" />
+      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-ne" @pointerdown.prevent="startResize('ne', $event)" />
+      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-nw" @pointerdown.prevent="startResize('nw', $event)" />
+      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-se" @pointerdown.prevent="startResize('se', $event)" />
+      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-sw" @pointerdown.prevent="startResize('sw', $event)" />
     </template>
 
     <!-- Titlebar -->
     <div
       class="fw-titlebar"
       :class="{ 'fw-titlebar-flash': flashing }"
-      @mousedown.prevent="startDrag($event)"
+      @pointerdown.prevent="startDrag($event)"
     >
-      <div class="fw-close" @mousedown.stop @click="close" />
+      <div class="fw-close" @pointerdown.stop @click="close" />
       <span class="fw-title">{{ title }}</span>
-      <div class="fw-titlebar-right" @mousedown.stop>
+      <div class="fw-titlebar-right" @pointerdown.stop>
         <slot name="titlebar-right" />
       </div>
     </div>
@@ -59,12 +59,15 @@ const props = withDefaults(defineProps<{
   canDock?: boolean
   defaultGeom?: Geom
   minSize?: MinSize
+  /** Initial dock state when no localStorage entry exists yet. */
+  defaultDock?: { side: DockSide; size: number } | null
 }>(), {
   canResizeV: true,
   canResizeH: true,
   canDock: true,
   defaultGeom: () => ({ x: 25, y: 25, w: 50, h: 50 }),
   minSize: () => ({ w: 10, h: 8 }),
+  defaultDock: null,
 })
 
 const emit = defineEmits<{
@@ -127,39 +130,50 @@ interface StoredState {
 function loadState(): void {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
-    if (!raw) return
-    const s = JSON.parse(raw) as Partial<StoredState>
-    if (typeof s.x === 'number') pctX.value = s.x
-    if (typeof s.y === 'number') pctY.value = s.y
-    if (typeof s.w === 'number') pctW.value = s.w
-    if (typeof s.h === 'number') pctH.value = s.h
-    preDockW = pctW.value
-    preDockH = pctH.value
-    if (props.canDock && s.dock && typeof s.dockSize === 'number') {
-      dockWindow(props.id, s.dock as DockSide, s.dockSize)
+    if (raw) {
+      const s = JSON.parse(raw) as Partial<StoredState>
+      if (typeof s.x === 'number') pctX.value = s.x
+      if (typeof s.y === 'number') pctY.value = s.y
+      if (typeof s.w === 'number') pctW.value = s.w
+      if (typeof s.h === 'number') pctH.value = s.h
+      preDockW = pctW.value
+      preDockH = pctH.value
+      if (props.canDock && s.dock && typeof s.dockSize === 'number') {
+        dockWindow(props.id, s.dock as DockSide, s.dockSize)
+      }
+      if (typeof s.visible === 'boolean' && s.visible !== props.visible) {
+        emit('update:visible', s.visible)
+      }
+      return
     }
-    if (typeof s.visible === 'boolean' && s.visible !== props.visible) {
-      emit('update:visible', s.visible)
+    /* No persisted state — apply defaultDock once if provided. The window
+     * is still saved with its dock side+size on the first interaction. */
+    if (props.canDock && props.defaultDock) {
+      dockWindow(props.id, props.defaultDock.side, props.defaultDock.size)
     }
   } catch { /* corrupt JSON — ignore */ }
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 function saveState(): void {
+  /* Snapshot synchronously. The visibility-change watcher that calls
+   * undockWindow() runs after this saveState (also via the visibility
+   * watch), so reading dock state inside the timer would see the
+   * post-undock null and clobber persisted dock intent. */
+  const dock = props.canDock ? docks[props.id] : null
+  const snapshot: StoredState = {
+    x: Math.round(pctX.value * 10) / 10,
+    y: Math.round(pctY.value * 10) / 10,
+    w: Math.round(pctW.value * 10) / 10,
+    h: Math.round(pctH.value * 10) / 10,
+    visible: props.visible,
+    dock: (dock?.side as DockSide) ?? null,
+    dockSize: dock?.size ?? 0,
+  }
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = setTimeout(() => {
     saveTimer = null
-    const dock = props.canDock ? docks[props.id] : null
-    const s: StoredState = {
-      x: Math.round(pctX.value * 10) / 10,
-      y: Math.round(pctY.value * 10) / 10,
-      w: Math.round(pctW.value * 10) / 10,
-      h: Math.round(pctH.value * 10) / 10,
-      visible: props.visible,
-      dock: (dock?.side as DockSide) ?? null,
-      dockSize: dock?.size ?? 0,
-    }
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)) }
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot)) }
     catch { /* quota — ignore */ }
   }, 500)
 }
@@ -240,8 +254,13 @@ let dragStartX = 0, dragStartY = 0, dragOffX = 0, dragOffY = 0
 let dragMoved = false
 let wasDockedOnDragStart = false
 
-function startDrag(e: MouseEvent) {
+let dragPointerId = -1
+
+function startDrag(e: PointerEvent) {
   bringToFront()
+  /* Only react to primary pointer (left-click for mouse, single-finger
+   * for touch). Multi-touch / right-click drag would mis-track. */
+  if (!e.isPrimary) return
   wasDockedOnDragStart = isDocked.value
   if (isDocked.value) performUndock(e)
   dragStartX = e.clientX
@@ -249,10 +268,14 @@ function startDrag(e: MouseEvent) {
   dragOffX = pctX.value
   dragOffY = pctY.value
   dragMoved = false
-  window.addEventListener('mousemove', onDrag)
-  window.addEventListener('mouseup', endDrag)
+  dragPointerId = e.pointerId
+  ;(e.currentTarget as Element | null)?.setPointerCapture?.(e.pointerId)
+  window.addEventListener('pointermove', onDrag)
+  window.addEventListener('pointerup', endDrag)
+  window.addEventListener('pointercancel', endDrag)
 }
-function onDrag(e: MouseEvent) {
+function onDrag(e: PointerEvent) {
+  if (e.pointerId !== dragPointerId) return
   const dx = e.clientX - dragStartX
   const dy = e.clientY - dragStartY
   if (!dragMoved && dx * dx + dy * dy >= MIN_DRAG_PX * MIN_DRAG_PX) dragMoved = true
@@ -264,9 +287,12 @@ function onDrag(e: MouseEvent) {
   pctX.value = Math.min(100 - pctW.value, Math.max(0, pctX.value))
   pctY.value = Math.min(100 - pctH.value, Math.max(0, pctY.value))
 }
-function endDrag() {
-  window.removeEventListener('mousemove', onDrag)
-  window.removeEventListener('mouseup', endDrag)
+function endDrag(e: PointerEvent) {
+  if (e.pointerId !== dragPointerId) return
+  dragPointerId = -1
+  window.removeEventListener('pointermove', onDrag)
+  window.removeEventListener('pointerup', endDrag)
+  window.removeEventListener('pointercancel', endDrag)
   if (dragMoved) {
     const edge = detectDockEdge()
     if (edge) performDock(edge)
@@ -285,8 +311,11 @@ let resizeStartX = 0, resizeStartY = 0
 let resizeStartW = 0, resizeStartH = 0
 let resizeStartPX = 0, resizeStartPY = 0
 
-function startResize(edge: Edge, e: MouseEvent) {
+let resizePointerId = -1
+
+function startResize(edge: Edge, e: PointerEvent) {
   bringToFront()
+  if (!e.isPrimary) return
   if (isDocked.value) {
     const side = docks[props.id].side
     const allowed = side === 'bottom' ? 'n' : side === 'top' ? 's' : side === 'left' ? 'e' : 'w'
@@ -299,10 +328,14 @@ function startResize(edge: Edge, e: MouseEvent) {
   resizeStartH = isDocked.value ? docks[props.id].size : pctH.value
   resizeStartPX = pctX.value
   resizeStartPY = pctY.value
-  window.addEventListener('mousemove', onResize)
-  window.addEventListener('mouseup', endResize)
+  resizePointerId = e.pointerId
+  ;(e.currentTarget as Element | null)?.setPointerCapture?.(e.pointerId)
+  window.addEventListener('pointermove', onResize)
+  window.addEventListener('pointerup', endResize)
+  window.addEventListener('pointercancel', endResize)
 }
-function onResize(e: MouseEvent) {
+function onResize(e: PointerEvent) {
+  if (e.pointerId !== resizePointerId) return
   const { cw, ch } = containerSize()
   const dx = (e.clientX - resizeStartX) / cw * 100
   const dy = (e.clientY - resizeStartY) / ch * 100
@@ -329,9 +362,12 @@ function onResize(e: MouseEvent) {
     clamp()
   }
 }
-function endResize() {
-  window.removeEventListener('mousemove', onResize)
-  window.removeEventListener('mouseup', endResize)
+function endResize(e: PointerEvent) {
+  if (e.pointerId !== resizePointerId) return
+  resizePointerId = -1
+  window.removeEventListener('pointermove', onResize)
+  window.removeEventListener('pointerup', endResize)
+  window.removeEventListener('pointercancel', endResize)
   saveState()
 }
 
@@ -394,8 +430,10 @@ watch(() => props.visible, (vis) => {
   border-radius: 6px;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
   background: #000000;
+  /* `overflow: visible` lets resize handles extend past the window edge
+   * so the outside-of-border hit zone is clickable. Inner clipping is
+   * handled per-child via their own border-radius / overflow rules. */
 }
 
 .fw-titlebar {
@@ -408,6 +446,17 @@ watch(() => props.visible, (vis) => {
   cursor: grab;
   user-select: none;
   transition: background-color 0.3s ease;
+  /* Prevent the browser from interpreting touch drags as scroll/pinch
+   * so pointermove can drive the window on touch screens. */
+  touch-action: none;
+  /* Round the title bar's top corners to match the outer border, since
+   * the outer .fw no longer clips. */
+  border-top-left-radius: 5px;
+  border-top-right-radius: 5px;
+  /* Above the resize handles so the close button + drag still take
+   * priority inside the title-bar area. */
+  position: relative;
+  z-index: 11;
 }
 .fw-titlebar:active { cursor: grabbing; }
 
@@ -431,15 +480,25 @@ watch(() => props.visible, (vis) => {
 
 .fw-titlebar-right { display: flex; gap: 4px; flex-shrink: 0; }
 
-.fw-body { flex: 1; overflow: hidden; padding: 0 5px; }
+.fw-body {
+  flex: 1; overflow: hidden; padding: 0 5px;
+  /* Match the outer rounded border now that .fw doesn't clip. */
+  border-bottom-left-radius: 5px;
+  border-bottom-right-radius: 5px;
+}
 
-.fw-resize { position: absolute; z-index: 10; }
-.fw-resize-n  { top: -3px; left: 8px; right: 8px; height: 6px; cursor: n-resize; }
-.fw-resize-s  { bottom: -3px; left: 8px; right: 8px; height: 6px; cursor: s-resize; }
-.fw-resize-e  { right: -3px; top: 8px; bottom: 8px; width: 6px; cursor: e-resize; }
-.fw-resize-w  { left: -3px; top: 8px; bottom: 8px; width: 6px; cursor: w-resize; }
-.fw-resize-ne { top: -3px; right: -3px; width: 12px; height: 12px; cursor: ne-resize; }
-.fw-resize-nw { top: -3px; left: -3px; width: 12px; height: 12px; cursor: nw-resize; }
-.fw-resize-se { bottom: -3px; right: -3px; width: 12px; height: 12px; cursor: se-resize; }
-.fw-resize-sw { bottom: -3px; left: -3px; width: 12px; height: 12px; cursor: sw-resize; }
+/* Resize handles are invisible but generously sized so they're easy to
+ * grab on touch and with a mouse. Each handle straddles the window border
+ * — half outside, half inside — and the title bar (z-index: 11) wins over
+ * the inside half within its area, so the close/drag area still works.
+ * Bottom corners are larger because nothing competes for space there. */
+.fw-resize { position: absolute; z-index: 10; touch-action: none; }
+.fw-resize-n  { top: -10px;    left: 16px; right: 16px; height: 20px; cursor: n-resize; }
+.fw-resize-s  { bottom: -10px; left: 16px; right: 16px; height: 20px; cursor: s-resize; }
+.fw-resize-e  { right: -10px;  top: 16px;  bottom: 16px; width: 20px; cursor: e-resize; }
+.fw-resize-w  { left: -10px;   top: 16px;  bottom: 16px; width: 20px; cursor: w-resize; }
+.fw-resize-ne { top: -10px;    right: -10px; width: 24px; height: 24px; cursor: ne-resize; }
+.fw-resize-nw { top: -10px;    left: -10px;  width: 24px; height: 24px; cursor: nw-resize; }
+.fw-resize-se { bottom: -10px; right: -10px; width: 28px; height: 28px; cursor: se-resize; }
+.fw-resize-sw { bottom: -10px; left: -10px;  width: 28px; height: 28px; cursor: sw-resize; }
 </style>

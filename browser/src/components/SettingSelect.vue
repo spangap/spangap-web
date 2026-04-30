@@ -5,6 +5,7 @@
       class="col"
       :model-value="currentVal"
       :options="options"
+      :disable="disable"
       dense outlined
       emit-value map-options
       options-dense
@@ -21,6 +22,7 @@ const props = defineProps<{
   label: string
   k: string
   options: { label: string; value: string }[]
+  disable?: boolean
 }>()
 const device = useDeviceStore()
 

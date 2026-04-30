@@ -5,6 +5,7 @@
     :title="title"
     :visible="visible"
     :default-geom="defaultGeom"
+    :default-dock="defaultDock"
     :min-size="{ w: 10, h: 8 }"
     @update:visible="onVisibleChange"
   >
@@ -49,15 +50,26 @@ const emit = defineEmits<{
 function onVisibleChange(v: boolean) { emit('update:visible', v) }
 
 /* ── defaults + zoom persistence ── */
+/* Phone-sized initial layout: full-width, half-screen tall, docked top. */
+const isPhoneInit = window.matchMedia?.('(max-width: 599px)').matches ?? false
 const DEFAULTS: Record<string, { x: number; y: number; w: number; h: number }> = {
   cli: { x: 12.5, y: 77.5, w: 75, h: 20 },
   log: { x: 12.5, y: 2.5, w: 75, h: 70 },
 }
-const defaultGeom = DEFAULTS[props.configPrefix] ?? DEFAULTS.cli
+const defaultGeom = isPhoneInit
+  ? { x: 0, y: 0, w: 100, h: 50 }
+  : (DEFAULTS[props.configPrefix] ?? DEFAULTS.cli)
+const defaultDock = isPhoneInit
+  ? { side: 'top' as const, size: 50 }
+  : null
 
 const BASE_FONT = 14
 const ZOOM_KEY = `seccam.win.${props.configPrefix}.zoom`
-const zoom = ref(Number(localStorage.getItem(ZOOM_KEY) ?? 0) || 0)
+/* 3 stops below default (font ≈ 8px) so the small docked window holds
+ * useful CLI / log output on a phone. Stored value wins when present. */
+const DEFAULT_ZOOM = isPhoneInit ? -3 : 0
+const storedZoom = localStorage.getItem(ZOOM_KEY)
+const zoom = ref(storedZoom !== null ? (Number(storedZoom) || 0) : DEFAULT_ZOOM)
 const fontSize = computed(() => Math.max(8, BASE_FONT + zoom.value * 2))
 
 function persistZoom() {
