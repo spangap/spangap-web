@@ -426,7 +426,13 @@ watch(() => props.visible, (vis) => {
 <style scoped>
 .fw {
   position: absolute;
-  border: 1px solid white;
+  /* Two-stroke outline: 1px black ring directly around the window
+   * content, then a 1px white ring outside that (via box-shadow so it
+   * follows border-radius and doesn't affect layout). The black is
+   * what gives the editor a visible edge against light backgrounds; the
+   * white keeps the original visual identity against the dark page. */
+  border: 1px solid #000;
+  box-shadow: 0 0 0 1px #fff;
   border-radius: 6px;
   display: flex;
   flex-direction: column;

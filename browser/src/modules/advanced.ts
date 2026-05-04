@@ -99,6 +99,7 @@ export const videoStyle = computed(() => {
 })
 
 import DeveloperPanel from './panels/DeveloperPanel.vue'
+import { openEditor, isPathOpen } from './editor'
 
 const BACKLOG_PRESETS: Array<[string, number]> = [
   ['1 kB', 1024],
@@ -106,6 +107,12 @@ const BACKLOG_PRESETS: Array<[string, number]> = [
   ['8 kB', 8192],
   ['16 kB', 16384],
   ['64 kB', 65536],
+]
+
+const EDIT_FILES: Array<[string, string]> = [
+  ['boot',     '/state/boot'],
+  ['crontab',  '/state/crontab'],
+  ['net_up',   '/state/net_up'],
 ]
 
 export function registerAdvanced() {
@@ -121,6 +128,16 @@ export function registerAdvanced() {
         type: 'action' as const,
         order: (i + 1) * 10,
         action: () => { logBacklogBytes.value = bytes; persistBacklog() },
+      })),
+    },
+    { id: 'adv.edit', label: 'Edit', type: 'submenu', order: 27,
+      children: EDIT_FILES.map(([name, path], i) => ({
+        id: `adv.edit.${name}`,
+        label: name,
+        type: 'action' as const,
+        order: (i + 1) * 10,
+        action: () => { openEditor(path, name) },
+        disabled: () => isPathOpen(path),
       })),
     },
     { id: 'adv.dev', label: 'Developer Options', type: 'panel', order: 30, component: DeveloperPanel },

@@ -12,6 +12,7 @@ export interface MenuItem {
   action?: () => void          // for type === 'action'
   dynamicLabel?: () => string  // overrides `label` at render time when present
   checked?: () => boolean      // shows a leading checkmark when truthy
+  disabled?: () => boolean     // greys the item out when truthy
 }
 
 export interface MenuGroup {
