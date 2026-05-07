@@ -34,6 +34,20 @@ idf.py -p /dev/tty.usbmodem2101 flash    # flashes app + partition table + fixed
 
 Settings UI behavior for camera/exposure is summarized in [camera-web-ui.md](camera-web-ui.md).
 
+## URL → filesystem mappings (factory wiring)
+
+Installed by `main.cpp` (config key prefix `s.web.map[]`). URL prefixes match the underlying mount points so a URL in the browser address bar is the same string as the device filesystem path.
+
+| URL prefix      | Filesystem            | Auth   | `index` | `dav` | Notes |
+|-----------------|-----------------------|--------|---------|-------|-------|
+| `/`             | `/fixed/webroot`      | —      | SPA     | —     | The Quasar SPA. Try `<file>.gz` first, fall back to `index.html` for extensionless paths. |
+| `/sdcard`       | `/sdcard`             | admin  | yes     | yes   | Recordings + log files browser; WebDAV-mountable. |
+| `/state`        | `/state`              | admin  | yes     | yes   | Live config (`settings.json`, externals, certs) for inspection / hand-edit. |
+| `/fixed`        | `/fixed`              | admin  | yes     | yes   | Read-only LittleFS — webroot, factory_state, additional_state. |
+| `/.well-known`  | `/state/.well-known`  | —      | no      | —     | ACME HTTP-01 challenges. |
+
+`index=1` mappings emit HTML directory listings; `dav=1` mappings additionally accept WebDAV verbs (PUT, DELETE, MKCOL, MOVE, COPY, PROPFIND, LOCK, UNLOCK). `auth="admin"` requires a valid session cookie for the admin realm.
+
 ## Architecture
 
 Single task on core 1. Polls for incoming HTTP connections with `select()`. Subscribes to `net.up` ephemeral var via `storageSubscribeChanges` for network state changes — opens server sockets when network comes up, closes them on network down. Blocks on `ulTaskNotifyTake` + `itsPoll` when server socket is closed.

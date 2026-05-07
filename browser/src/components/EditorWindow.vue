@@ -126,7 +126,9 @@ const statusText = computed(() => {
   return ''
 })
 
-const apiUrl = computed(() => `/api/file${props.path}`)
+/* Files are served + PUT-able directly via the /state web wiring (WebDAV).
+ * props.path is e.g. "/state/boot" → fetch as-is (GET reads, PUT writes). */
+const apiUrl = computed(() => props.path)
 
 async function loadFile() {
   loaded.value = false
