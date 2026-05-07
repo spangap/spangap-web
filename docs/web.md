@@ -41,3 +41,29 @@ Single task on core 1. Polls for incoming HTTP connections with `select()`. Subs
 ### Endpoint registration via ITS aux
 
 Endpoints (RTSP, log, CLI, storage/config) register via ITS aux messages (`web_path_msg_t` for WS paths, `net_port_msg_t` for TCP ports). Tasks send these during their init to register URL prefixes and TCP listen ports. On a matching HTTP request, the web task injects the HTTP headers back (`itsServerInject`) and forwards the connection to the target task (`itsServerForward`). This centralizes port management and TLS handling in the web/net tasks — consumer tasks never see raw sockets.
+
+## Web Utility API (`web.h`)
+
+HTTP/WS convenience functions for tasks receiving forwarded connections. Tasks include `web.h` and call these directly (not via the web task).
+
+- **`webGetHeader(itsHandle, buf, maxLen, timeoutMs)`** — read HTTP request headers from ITS handle (injected data). Returns header length.
+- **`webHeaderField(hdr, len, "Field", out, outLen)`** — extract a header field value.
+- **`webGetMethod(hdr, len, out, outLen)`** — extract HTTP method (`GET`, `POST`, etc.).
+- **`webGetPath(hdr, len, out, outLen)`** — extract URL path (no leading `/`, no query string).
+- **`webGetQuery(hdr, len, "key", out, outLen)`** — extract query parameter value.
+- **`webSendResponse(h, status, contentType, body, bodyLen)`** — send full HTTP response.
+- **`webSendStatus(h, status)`** — send status-only response (204, 404, etc.).
+- **`wsUpgrade(h, hdr, hdrLen)`** — WS upgrade from pre-read headers. Extracts key, sends 101.
+- **`wsUpgrade(h, must, timeoutMs)`** — convenience: reads headers internally, does upgrade. `must=false` injects headers back on non-WS.
+- **`wsReadFrame(h, buf, size, &len, &binary)`** — read one WS frame (handles unmasking, ping/pong).
+- **`wsSendText(h, data, len)`** / **`wsSendBinary(h, data, len)`** — send WS frames.
+- **`wsSendClose(h)`** — send WS close frame.
+
+Typical task flow for a forwarded WS connection:
+```c
+// In onConnect (runs on task's own context via ITS_MSG_FORWARD):
+if (connectData->ws) {
+    wsUpgrade(handle);  // reads HTTP, sends 101
+    // From here: wsReadFrame() for input, wsSendText() for output
+}
+```
