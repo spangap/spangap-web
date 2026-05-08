@@ -235,12 +235,17 @@ class WebrtcSession {
   }
 }
 
-/* Singleton — every consumer imports the same session. */
-let singleton: WebrtcSession | null = null
+/* Singleton — every consumer imports the same session. Stored on globalThis
+ * via a registered Symbol so two bundle-side module instances (e.g. when
+ * diptych-browser imports relative and the consumer imports via package
+ * subpath under preserveSymlinks) still share one WebrtcSession. */
+const SESSION_KEY = Symbol.for('diptych.webrtcSession')
+type SessionHolder = { [SESSION_KEY]?: WebrtcSession }
+const sessionHolder = globalThis as unknown as SessionHolder
 
 export function getSession(): WebrtcSession {
-  if (!singleton) singleton = new WebrtcSession()
-  return singleton
+  if (!sessionHolder[SESSION_KEY]) sessionHolder[SESSION_KEY] = new WebrtcSession()
+  return sessionHolder[SESSION_KEY]!
 }
 
 export { WebrtcSession }

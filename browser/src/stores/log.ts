@@ -158,11 +158,15 @@ function formatLine(level: string, args: any[]): string {
 
 /** Wrap window.console.{log,info,warn,error,debug} so they also stream to
  *  device. The original console method runs first (so devtools still works),
- *  then the line is forwarded. Idempotent. */
-let consoleHooked = false
+ *  then the line is forwarded. Idempotent — guard lives on globalThis so
+ *  duplicate module instances (e.g. preserveSymlinks bundling the package
+ *  twice) still hook console exactly once. */
+const CONSOLE_HOOKED_KEY = Symbol.for('diptych.consoleHooked')
+type HookedHolder = { [CONSOLE_HOOKED_KEY]?: boolean }
+const hookedHolder = globalThis as unknown as HookedHolder
 export function installConsoleHooks() {
-  if (consoleHooked) return
-  consoleHooked = true
+  if (hookedHolder[CONSOLE_HOOKED_KEY]) return
+  hookedHolder[CONSOLE_HOOKED_KEY] = true
   const orig = {
     log:   console.log.bind(console),
     info:  console.info.bind(console),
