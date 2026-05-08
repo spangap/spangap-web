@@ -12,26 +12,28 @@
         <div class="col">{{ rollbackAvailable ? 'available (other slot)' : 'unavailable' }}</div></div>
     </div>
 
-    <q-separator dark />
+    <template v-if="otaEnabled">
+      <q-separator dark />
 
-    <PanelHeading>Update</PanelHeading>
-    <div class="q-gutter-y-sm">
-      <SettingText label="Manifest URL" k="s.sys.ota.url" />
-      <div class="row no-wrap"><div class="col-5 text-caption">Latest</div>
-        <div class="col">{{ latestText }}</div></div>
-      <div class="row q-gutter-x-sm">
-        <q-btn dense flat outline label="Check for update" :disable="busy"
-          @click="onCheck" />
-        <q-btn dense unelevated color="primary" :disable="!updateAvailable || busy"
-          @click="onUpgrade">
-          {{ busy ? 'Updating…' : 'Install update' }}
-        </q-btn>
+      <PanelHeading>Update</PanelHeading>
+      <div class="q-gutter-y-sm">
+        <SettingText label="Manifest URL" k="s.sys.ota.url" />
+        <div class="row no-wrap"><div class="col-5 text-caption">Latest</div>
+          <div class="col">{{ latestText }}</div></div>
+        <div class="row q-gutter-x-sm">
+          <q-btn dense flat outline label="Check for update" :disable="busy"
+            @click="onCheck" />
+          <q-btn dense unelevated color="primary" :disable="!updateAvailable || busy"
+            @click="onUpgrade">
+            {{ busy ? 'Updating…' : 'Install update' }}
+          </q-btn>
+        </div>
+        <div v-if="busy" class="text-caption text-grey-5">
+          Please wait — download, flash, and reboot can take a minute. Watch the
+          Log window for progress.
+        </div>
       </div>
-      <div v-if="busy" class="text-caption text-grey-5">
-        Please wait — download, flash, and reboot can take a minute. Watch the
-        Log window for progress.
-      </div>
-    </div>
+    </template>
   </div>
 </template>
 
@@ -40,6 +42,11 @@ import { computed } from 'vue'
 import { useDeviceStore } from '../stores/device'
 
 const device = useDeviceStore()
+
+/* OTA UI is gated by VITE_DIPTYCH_OTA (mirrors firmware Kconfig). When the
+ * firmware build has CONFIG_DIPTYCH_OTA=n, this flag is unset and Vite
+ * tree-shakes the Update section out of the bundle. */
+const otaEnabled = !!import.meta.env.VITE_DIPTYCH_OTA
 
 const progName = computed(() => {
   const p = device.get('s.sys.progname')
