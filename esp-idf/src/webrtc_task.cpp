@@ -1130,8 +1130,14 @@ static void webrtcTaskFn(void*) {
         openUdpSocket();
     });
 
-    storageSubscribeChanges("net.up", ON_CHANGE {
-        if (atoi(val)) {
+    /* Track any-WiFi-up via wifi.{sta,ap}.up. Both fire once per transition,
+     * we react only when the OR (netIsUp()) actually flips. */
+    static bool wifiWasUp = false;
+    static auto onWifiUpChange = [](const char*, const char*) {
+        bool isUp = netIsUp();
+        if (isUp == wifiWasUp) return;
+        wifiWasUp = isUp;
+        if (isUp) {
             dtlsSetup();
             openUdpSocket();
         } else {
@@ -1140,7 +1146,9 @@ static void webrtcTaskFn(void*) {
             closeUdpSocket();
             peerKnown = false;
         }
-    });
+    };
+    storageSubscribeChanges("wifi.sta.up", onWifiUpChange);
+    storageSubscribeChanges("wifi.ap.up",  onWifiUpChange);
 
     /* ICE credentials (ICE-lite; peer creds ignored) */
     { uint32_t r = esp_random();

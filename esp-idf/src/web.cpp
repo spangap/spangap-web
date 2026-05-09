@@ -1439,18 +1439,22 @@ static void webTaskFn(void* arg) {
         loadMimeTypes();
     });
 
-    storageSubscribeChanges("net.up", ON_CHANGE {
-        if (atoi(val) == 0) {
-            for (int i = 0; i < webMaxHandles; i++) {
-                if (handles[i].state != HS_IDLE && handles[i].itsHandle >= 0) {
-                    int itsH = handles[i].itsHandle;
-                    handleReset(i);
-                    handles[i].itsHandle = -1;
-                    itsDisconnect(itsH);
-                }
+    /* Close all live clients when there's no WiFi at all. Subscribed to both
+     * wifi.{sta,ap}.up: each fires once per transition, the netIsUp() guard
+     * skips fires where the other interface is still up. */
+    static auto onWifiUpChange = [](const char*, const char*) {
+        if (netIsUp()) return;
+        for (int i = 0; i < webMaxHandles; i++) {
+            if (handles[i].state != HS_IDLE && handles[i].itsHandle >= 0) {
+                int itsH = handles[i].itsHandle;
+                handleReset(i);
+                handles[i].itsHandle = -1;
+                itsDisconnect(itsH);
             }
         }
-    });
+    };
+    storageSubscribeChanges("wifi.sta.up", onWifiUpChange);
+    storageSubscribeChanges("wifi.ap.up",  onWifiUpChange);
 
     /* Register HTTP/HTTPS ports with network */
     { net_port_msg_t reg = {};
