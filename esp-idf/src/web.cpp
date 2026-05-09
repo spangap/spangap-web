@@ -1417,6 +1417,15 @@ static void tryParseRequest(int h) {
         struct stat st;
         bool isDir = (fs_stat(fsPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
         if (isDir) {
+            /* Canonicalise: /state → /state/. Without the trailing slash,
+             * relative hrefs in the listing (and any links pasted by the
+             * user) resolve against the parent path instead of the dir,
+             * and Apache/nginx-style clients expect the redirect. */
+            if (path.empty() || path.back() != '/') {
+                std::string loc = "/" + path + "/";
+                serve301(h, loc.c_str());
+                return;
+            }
             std::string urlDir = map->url;
             if (urlDir.back() != '/') urlDir += '/';
             if (!relPath.empty()) urlDir += relPath + "/";
