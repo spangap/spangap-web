@@ -22,8 +22,9 @@ void webMapAddIfAbsent(const char* url, const char* files,
 static constexpr uint16_t WEB_HTTP_PORT  = 80;
 static constexpr uint16_t WEB_HTTPS_PORT = 443;
 
-/** Web's aux port: tasks register URL prefixes here. */
-static constexpr uint16_t WEB_PATH_REG_PORT = 0;
+/** Web's aux ports: tasks register URL prefixes here. */
+static constexpr uint16_t WEB_PATH_REG_PORT     = 0;  /* forward-to-task registration */
+static constexpr uint16_t WEB_PATH_HANDLER_PORT = 2;  /* in-web callback registration */
 
 /* ---- ITS aux message: task → web URL registration ---- */
 
@@ -37,6 +38,41 @@ typedef struct {
 } web_path_msg_t;
 
 /* Web forwards use net_connect_t (from net.h) with ws=1. */
+
+/* ---- In-web URL handlers (no task needed) ---- */
+
+/** Callback signature for URL handlers that run on web's own task.
+ *  Use this for short request/response endpoints whose natural-owner task
+ *  is too time-sensitive to host them (e.g. /api/recordings: record's
+ *  task can't block on a 1 s SCAM-header scan, but web can).
+ *
+ *  - `handle`  — ITS handle to the client; use webSendResponse / webSendStatus
+ *                / itsSend to reply, or webReadBody to pull a POST body.
+ *  - `hdr`     — full received buffer (headers + any body bytes that arrived
+ *                in the same TCP segment); web's parsers (webGetMethod,
+ *                webGetPath, webHeaderField, webExtractCookie) all accept
+ *                this directly. Pass straight to webReadBody as the `hdr`
+ *                + `total` arguments for POST handling.
+ *  - `hdrLen`  — number of valid bytes in `hdr`.
+ *
+ *  After the callback returns, web does itsSendDrain + itsDisconnect and
+ *  recycles the slot — the handler must NOT call itsDisconnect itself.
+ *  Handlers run on web's task: keep work bounded; no streaming responses,
+ *  no long blocking calls. Spin off a temp task or use the forward pattern
+ *  (web_path_msg_t) for anything that doesn't fit in a quick burst. */
+typedef void (*web_url_handler_t)(int handle, const char* hdr, int hdrLen);
+
+/** Aux payload: registers a URL prefix → callback. Sent by webRegisterHandler. */
+typedef struct {
+    web_url_handler_t cb;
+    char path[16];
+} web_handler_msg_t;
+
+/** Register a URL prefix to be served inline on web's task. Safe to call
+ *  from any task, including web's own (the aux is queued for the next
+ *  itsPoll). Each request whose path matches `path` (longest-prefix match
+ *  on a `/` boundary, or exact) invokes `cb`. */
+void webRegisterHandler(const char* path, web_url_handler_t cb);
 
 /* ---- HTTP/WebSocket convenience functions for tasks ---- */
 

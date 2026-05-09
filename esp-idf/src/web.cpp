@@ -471,35 +471,90 @@ static void handleTouch(int h) {
 
 /* ---- URL path table (registered by tasks via aux messages) ---- */
 
-#define WEB_MAX_PATHS 6
+#define WEB_MAX_PATHS 8
+
+enum web_path_kind_t : uint8_t {
+    WEB_PATH_FORWARD = 0,   /* itsServerForward to (task, itsPort) */
+    WEB_PATH_HANDLER = 1,   /* invoke cb on web's task */
+};
 
 struct web_path_t {
     char path[16];
-    TaskHandle_t task;
-    uint16_t itsPort;
+    web_path_kind_t kind;
+    union {
+        struct { TaskHandle_t task; uint16_t itsPort; } fwd;
+        web_url_handler_t cb;
+    };
 };
 
 static web_path_t webPaths[WEB_MAX_PATHS];
 static int webPathCount = 0;
 
+/* Longest registered prefix that matches `path` on a `/` boundary or exactly.
+ *  Examples:
+ *    registered "auth"                     matches "auth", "auth/login"
+ *    registered "api/recordings"           matches "api/recordings", "api/recordings/dates"
+ *    registered ".well-known/acme-challenge" matches ".well-known/acme-challenge/<token>"
+ *  None of those would claim "auth-something" or "api/other". */
 static web_path_t* pathFind(const char* path) {
+    web_path_t* best = nullptr;
+    size_t bestLen = 0;
+    size_t plen = strlen(path);
+    for (int i = 0; i < webPathCount; i++) {
+        size_t rlen = strlen(webPaths[i].path);
+        if (rlen > plen || rlen <= bestLen) continue;
+        if (strncmp(path, webPaths[i].path, rlen) != 0) continue;
+        if (rlen < plen && path[rlen] != '/') continue;
+        best = &webPaths[i];
+        bestLen = rlen;
+    }
+    return best;
+}
+
+/* Exact-match lookup, used when registering to update an existing entry. */
+static web_path_t* pathFindExact(const char* path) {
     for (int i = 0; i < webPathCount; i++)
         if (strcmp(webPaths[i].path, path) == 0) return &webPaths[i];
     return nullptr;
 }
 
-/* ITS aux callback */
+static web_path_t* pathAllocOrFind(const char* path) {
+    web_path_t* p = pathFindExact(path);
+    if (!p) {
+        if (webPathCount >= WEB_MAX_PATHS) return nullptr;
+        p = &webPaths[webPathCount++];
+        safeStrncpy(p->path, path, sizeof(p->path));
+    }
+    return p;
+}
+
+/* ITS aux: forward-target registration (existing) */
 static void webOnAux(TaskHandle_t sender, const void* data, size_t len) {
     if (len < sizeof(web_path_msg_t)) return;
     auto* msg = (const web_path_msg_t*)data;
-    web_path_t* p = pathFind(msg->path);
-    if (!p) {
-        if (webPathCount >= WEB_MAX_PATHS) return;
-        p = &webPaths[webPathCount++];
-    }
-    safeStrncpy(p->path, msg->path, sizeof(p->path));
-    p->task = sender;
-    p->itsPort = msg->itsPort;
+    web_path_t* p = pathAllocOrFind(msg->path);
+    if (!p) return;
+    p->kind = WEB_PATH_FORWARD;
+    p->fwd.task = sender;
+    p->fwd.itsPort = msg->itsPort;
+}
+
+/* ITS aux: in-web callback registration */
+static void webOnHandlerAux(TaskHandle_t /*sender*/, const void* data, size_t len) {
+    if (len < sizeof(web_handler_msg_t)) return;
+    auto* msg = (const web_handler_msg_t*)data;
+    web_path_t* p = pathAllocOrFind(msg->path);
+    if (!p) return;
+    p->kind = WEB_PATH_HANDLER;
+    p->cb = msg->cb;
+}
+
+void webRegisterHandler(const char* path, web_url_handler_t cb) {
+    web_handler_msg_t msg = {};
+    msg.cb = cb;
+    safeStrncpy(msg.path, path, sizeof(msg.path));
+    while (!itsSendAux("web", WEB_PATH_HANDLER_PORT, &msg, sizeof(msg), pdMS_TO_TICKS(500)))
+        vTaskDelay(pdMS_TO_TICKS(100));
 }
 
 /* ---- ITS server callbacks ---- */
@@ -1113,11 +1168,7 @@ static void tryParseRequest(int h) {
     }
 
     /* ---- Registered path forwarding (WS and HTTP) ---- */
-    std::string topPath = path;
-    size_t slash = path.find('/');
-    if (slash != std::string::npos) topPath = path.substr(0, slash);
-
-    web_path_t* wp = pathFind(topPath.c_str());
+    web_path_t* wp = pathFind(path.c_str());
 
     /* Inject the *whole* received buffer (wh.rLen, not just `consumed`) — for a
      * POST whose body fits in the same TCP segment as the headers, the body
@@ -1125,11 +1176,11 @@ static void tryParseRequest(int h) {
      * dropped when wh.rLen=0 below. Target task reads headers via webGetHeader
      * (which stops at \r\n\r\n), then webReadBody picks up the body bytes that
      * came along — exactly the round-trip we want. */
-    if (upgrade && wp) {
+    if (upgrade && wp && wp->kind == WEB_PATH_FORWARD) {
         int itsH = wh.itsHandle;
         itsInject(itsH, false, wh.rbuf, wh.rLen);
         net_connect_t cd = { 1, wh.tls, wh.clientAddr };
-        int fwd = itsServerForwardByTaskHandle(itsH, wp->task, wp->itsPort, &cd, sizeof(cd));
+        int fwd = itsServerForwardByTaskHandle(itsH, wp->fwd.task, wp->fwd.itsPort, &cd, sizeof(cd));
         if (fwd < 0) {
             const char* r503 = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
             itsSendAll(itsH, r503, strlen(r503));
@@ -1139,17 +1190,37 @@ static void tryParseRequest(int h) {
         return;
     }
 
-    if (wp && !path.empty()) {
+    if (wp && !path.empty() && wp->kind == WEB_PATH_FORWARD) {
         int itsH = wh.itsHandle;
         itsInject(itsH, false, wh.rbuf, wh.rLen);
         net_connect_t cd = { 0, wh.tls, wh.clientAddr };
-        int fwd = itsServerForwardByTaskHandle(itsH, wp->task, wp->itsPort, &cd, sizeof(cd));
+        int fwd = itsServerForwardByTaskHandle(itsH, wp->fwd.task, wp->fwd.itsPort, &cd, sizeof(cd));
         if (fwd < 0) {
             const char* r503 = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
             itsSendAll(itsH, r503, strlen(r503));
             itsDisconnect(itsH);
         }
         wh.state = HS_IDLE; wh.rLen = 0; wh.itsHandle = -1;
+        return;
+    }
+
+    if (wp && !path.empty() && wp->kind == WEB_PATH_HANDLER) {
+        /* In-web callback: handler runs synchronously on this task with the
+         * already-parsed buffer. After it returns, drain the body (so any
+         * un-consumed Content-Length bytes don't leak into the next request),
+         * then keep the slot alive for the next request on the same TCP/TLS
+         * connection (HTTP keep-alive). */
+        int itsH = wh.itsHandle;
+        wp->cb(itsH, wh.rbuf, wh.rLen);
+        if (!itsConnected(itsH)) {
+            handleReset(h);
+            wh.itsHandle = -1;
+            wh.state = HS_IDLE;
+            return;
+        }
+        consumeRequest(wh, consumed);
+        wh.state = HS_READING;
+        handleTouch(h);
         return;
     }
 
@@ -1427,8 +1498,9 @@ static void webTaskFn(void* arg) {
         itsServerOnBusy(p, webItsBusy);
         itsServerOnDisconnect(p, webItsDisconnect);
     }
-    itsOnAux(WEB_PATH_REG_PORT, webOnAux);
-    itsOnAux(WEB_FILE_DONE_PORT, webOnFileDone);
+    itsOnAux(WEB_PATH_REG_PORT,     webOnAux);
+    itsOnAux(WEB_PATH_HANDLER_PORT, webOnHandlerAux);
+    itsOnAux(WEB_FILE_DONE_PORT,    webOnFileDone);
 
     loadMappings();
     loadMimeTypes();
@@ -1617,9 +1689,13 @@ static void cmdWeb(const char* a) {
         cliPrintf("  %s%s -> %s%s%s\n", webMaps[i].url.empty() ? "" : "/", webMaps[i].url.c_str(), webMaps[i].files.c_str(),
                   webMaps[i].dirIndex ? " [index]" : "", webMaps[i].dav ? " [dav]" : "");
     cliPrintf("registered paths:\n");
-    for (int i = 0; i < webPathCount; i++)
-        cliPrintf("  /%s -> [%s]:%d\n", webPaths[i].path,
-                  pcTaskGetName(webPaths[i].task), webPaths[i].itsPort);
+    for (int i = 0; i < webPathCount; i++) {
+        if (webPaths[i].kind == WEB_PATH_FORWARD)
+            cliPrintf("  /%s -> [%s]:%d\n", webPaths[i].path,
+                      pcTaskGetName(webPaths[i].fwd.task), webPaths[i].fwd.itsPort);
+        else
+            cliPrintf("  /%s -> handler\n", webPaths[i].path);
+    }
 }
 
 /* Append a URL→filesystem mapping to s.web.map if not already present.
@@ -1862,7 +1938,7 @@ bool webSendResponse(int itsHandle, int status, const char* contentType,
     char hdr[256];
     int n = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %u\r\n"
-        "Connection: close\r\n\r\n",
+        "Connection: keep-alive\r\n\r\n",
         status, statusText(status), contentType, (unsigned)bodyLen);
     if (!itsSendAll(itsHandle, hdr, n)) return false;
     if (bodyLen > 0) return itsSendAll(itsHandle, body, bodyLen);
@@ -1872,7 +1948,7 @@ bool webSendResponse(int itsHandle, int status, const char* contentType,
 bool webSendStatus(int itsHandle, int status) {
     char hdr[128];
     int n = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 %d %s\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "HTTP/1.1 %d %s\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n",
         status, statusText(status));
     return itsSendAll(itsHandle, hdr, n);
 }
