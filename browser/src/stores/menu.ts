@@ -29,14 +29,30 @@ export const useMenuStore = defineStore('menu', () => {
   const menus = reactive(new Map<string, MenuGroup>())
   const activePanel = ref<string | null>(null)
 
+  /** Merge `incoming` into `target`, recursing into submenu children when ids match. */
+  function mergeItems(target: MenuItem[], incoming: MenuItem[]) {
+    for (const item of incoming) {
+      const existing = target.find(t => t.id === item.id)
+      if (existing && existing.type === 'submenu' && item.type === 'submenu') {
+        existing.children ??= []
+        mergeItems(existing.children, item.children ?? [])
+        existing.children.sort((a, b) => a.order - b.order)
+      } else {
+        target.push(item)
+      }
+    }
+    target.sort((a, b) => a.order - b.order)
+  }
+
   function register(menuId: string, label: string, order: number, items: MenuItem[], options?: { activeLabel?: string, onClose?: () => void, hidden?: () => boolean }) {
     const existing = menus.get(menuId)
     if (existing) {
-      existing.items.push(...items)
-      existing.items.sort((a, b) => a.order - b.order)
+      mergeItems(existing.items, items)
       if (options) Object.assign(existing, options)
     } else {
-      menus.set(menuId, { id: menuId, label, order, items: [...items].sort((a, b) => a.order - b.order), ...options })
+      const fresh: MenuItem[] = []
+      mergeItems(fresh, items)
+      menus.set(menuId, { id: menuId, label, order, items: fresh, ...options })
     }
   }
 
@@ -56,17 +72,23 @@ export const useMenuStore = defineStore('menu', () => {
     activePanel.value = null
   }
 
-  /** Find the component for the active panel by searching all menus (including submenu children). */
+  function findItem(items: MenuItem[], id: string): MenuItem | null {
+    for (const item of items) {
+      if (item.id === id) return item
+      if (item.children) {
+        const found = findItem(item.children, id)
+        if (found) return found
+      }
+    }
+    return null
+  }
+
+  /** Find the component for the active panel by searching all menus (including nested submenu children). */
   const activePanelComponent = computed<Component | null>(() => {
     if (!activePanel.value) return null
     for (const menu of menus.values()) {
-      for (const item of menu.items) {
-        if (item.id === activePanel.value && item.component) return item.component
-        if (item.children) {
-          const child = item.children.find(c => c.id === activePanel.value)
-          if (child?.component) return child.component
-        }
-      }
+      const item = findItem(menu.items, activePanel.value)
+      if (item?.component) return item.component
     }
     return null
   })
@@ -74,13 +96,8 @@ export const useMenuStore = defineStore('menu', () => {
   const activePanelLabel = computed<string>(() => {
     if (!activePanel.value) return ''
     for (const menu of menus.values()) {
-      for (const item of menu.items) {
-        if (item.id === activePanel.value) return item.label
-        if (item.children) {
-          const child = item.children.find(c => c.id === activePanel.value)
-          if (child) return child.label
-        }
-      }
+      const item = findItem(menu.items, activePanel.value)
+      if (item) return item.label
     }
     return ''
   })

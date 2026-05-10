@@ -50,7 +50,10 @@ const otaEnabled = !!import.meta.env.VITE_DIPTYCH_OTA
 
 const progName = computed(() => {
   const p = device.get('s.sys.progname')
-  return (typeof p === 'string' && p.trim()) || 'Seccam'
+  if (typeof p === 'string' && p.trim()) return p.trim()
+  const proj = device.get('s.sys.project')
+  if (typeof proj === 'string' && proj.length > 0) return proj.charAt(0).toUpperCase() + proj.slice(1)
+  return 'Diptych'
 })
 
 const buildTime    = computed(() => num(device.get('sys.buildtime.app')))
