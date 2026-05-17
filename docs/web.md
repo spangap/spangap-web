@@ -40,7 +40,7 @@ Installed by `main.cpp` (config key prefix `s.web.map[]`). URL prefixes match th
 |-----------------|-----------------------|--------|---------|-------|-------|
 | `/`             | `/fixed/webroot`      | —      | SPA     | —     | The Quasar SPA. Try `<file>.gz` first, fall back to `index.html` for extensionless paths. |
 | `/sdcard`       | `/sdcard`             | admin  | yes     | yes   | Recordings + log files browser; WebDAV-mountable. |
-| `/state`        | `/state`              | admin  | yes     | yes   | Live config (`settings.json`, externals, certs) for inspection / hand-edit. |
+| `/state`        | `/state`              | admin  | yes     | yes   | Live config (`storage/root.json`, externals, certs) for inspection / hand-edit. |
 | `/fixed`        | `/fixed`              | admin  | yes     | yes   | Read-only LittleFS — webroot, factory_state, additional_state. |
 | `/.well-known`  | `/state/.well-known`  | —      | no      | —     | ACME HTTP-01 challenges. |
 
