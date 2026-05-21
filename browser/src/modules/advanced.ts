@@ -35,16 +35,29 @@ export const docks = reactive<Record<string, DockInfo>>({
 
 export const dockOrder = reactive<string[]>([])
 
+/** docks is seeded only with the platform windows (cli, log). Consumers
+ *  add their own FloatingWindows (reticulous: Map/Reticulum/TCP/UDP/LoRa)
+ *  with arbitrary ids, so create the entry on first dock rather than
+ *  assuming it exists — otherwise docks[id].side throws "Cannot set
+ *  properties of undefined". */
+function ensureDock(id: string): DockInfo {
+  let d = docks[id]
+  if (!d) { d = { side: null, size: 50 }; docks[id] = d }
+  return d
+}
+
 export function dockWindow(id: string, side: DockSide, size: number) {
-  docks[id].side = side
-  docks[id].size = size
+  const d = ensureDock(id)
+  d.side = side
+  d.size = size
   const idx = dockOrder.indexOf(id)
   if (idx >= 0) dockOrder.splice(idx, 1)
   dockOrder.push(id)
 }
 
 export function undockWindow(id: string) {
-  docks[id].side = null
+  const d = docks[id]
+  if (d) d.side = null
   const idx = dockOrder.indexOf(id)
   if (idx >= 0) dockOrder.splice(idx, 1)
 }
