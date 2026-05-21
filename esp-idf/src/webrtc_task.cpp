@@ -187,10 +187,12 @@ static dc_its_map_t dcMap[DC_MAX_CHANNELS];
 /* Forward decl — dtlsSctpSend is defined further down (after DTLS setup). */
 static int dtlsSctpSend(const uint8_t* pkt, size_t len, void* ctx);
 
-/* Receive buffer for packets coming in from ITS target (PSRAM) —
-   sized for the largest packet we'd ever forward (e.g. a full JPEG). */
-static constexpr size_t ROUTER_RECV_BUF_SIZE = 256 * 1024;
-static uint8_t* routerRecvBuf = nullptr;
+/* Receive buffer for packets coming in from ITS target (PSRAM). Grown
+   lazily in webrtcDcOpen to the largest fromSize any routed port declares,
+   so each app pays only for the biggest packet it can actually forward
+   (storage 64 KB here; a full JPEG ~256 KB on seccam's live path). */
+static uint8_t* routerRecvBuf     = nullptr;
+static size_t   routerRecvBufSize = 0;
 
 static int dcMapFindByStream(uint16_t streamId) {
     for (int i = 0; i < DC_MAX_CHANNELS; i++)
@@ -304,8 +306,9 @@ static void schedulerPass() {
         }
 
         /* Fresh pull from the ITS buffer. */
+        if (!routerRecvBuf) break;   /* no DC has sized the buffer yet */
         size_t nb = itsRecv(dcMap[pick].handle, routerRecvBuf,
-                            ROUTER_RECV_BUF_SIZE, 0);
+                            routerRecvBufSize, 0);
         if (nb == 0) continue;   /* race: drained before we could read */
 
         int r = sctpSend(&sctp, dcMap[pick].streamId, PPID_BINARY,
@@ -757,8 +760,22 @@ static void webrtcDcOpen(sctp_assoc_t* a, int chIdx) {
     dcMap[slot].handle   = handle;
     dcMap[slot].streamId = ch->streamId;
     dcMap[slot].priority = ch->priority;
-    info("DC routed: %s:%d stream=%u prio=%u → handle=%d\n",
-         taskName, port, ch->streamId, (unsigned)ch->priority, handle);
+
+    /* Grow the shared router receive buffer to fit this port's largest
+       packet (its declared fromSize). Grow-only — a smaller DC reuses the
+       bigger buffer, and the high-water mark is bounded by the largest
+       port the firmware defines. Runs on the webrtc task, same as the
+       router loop, so it cannot race a read in progress. */
+    size_t need = itsRecvBufSize(handle);
+    if (need > routerRecvBufSize) {
+        uint8_t* nb = (uint8_t*)heap_caps_realloc(routerRecvBuf, need, MALLOC_CAP_SPIRAM);
+        if (nb) { routerRecvBuf = nb; routerRecvBufSize = need; }
+        else    err("router recv buf grow to %u failed\n", (unsigned)need);
+    }
+
+    info("DC routed: %s:%d stream=%u prio=%u → handle=%d (rxbuf %u)\n",
+         taskName, port, ch->streamId, (unsigned)ch->priority, handle,
+         (unsigned)routerRecvBufSize);
 }
 
 /* SCTP stream-reset from peer (browser closed the DC). */
@@ -1100,6 +1117,10 @@ static void closeUdpSocket() {
 /* ---- Main task ---- */
 
 static void webrtcTaskFn(void*) {
+    /* routerRecvBuf is allocated lazily in webrtcDcOpen, grown to the
+       largest fromSize of any routed port (see its declaration), so we
+       don't reserve a worst-case buffer the device may never need. */
+
     /* ITS server for signaling WS, plus ITS client for outbound routing
        to content tasks (live, play, …). */
     itsServerInit();
@@ -1313,8 +1334,6 @@ static void webrtcTaskFn(void*) {
 /* ---- Init ---- */
 
 void webrtcInit() {
-    routerRecvBuf = (uint8_t*)heap_caps_malloc(ROUTER_RECV_BUF_SIZE, MALLOC_CAP_SPIRAM);
-    if (!routerRecvBuf) { err("router recv buf alloc failed\n"); return; }
     for (int i = 0; i < DC_MAX_CHANNELS; i++) dcMap[i].handle = -1;
     pmLockCreate(PM_NO_LIGHT_SLEEP, "webrtc", &webrtcLockLS);
     pmLockCreate(PM_CPU_FREQ_MAX,   "webrtc", &webrtcLockCPU);
