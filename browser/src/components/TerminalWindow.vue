@@ -38,9 +38,6 @@ const props = defineProps<{
   dcProtocol?: string
   readonly?: boolean
   configPrefix: string   // 'cli' or 'log' — window id + localStorage namespace
-  /** CLI input: coalesce keystrokes within this many ms into one DC message.
-   *  0 = send each keystroke immediately. Default 50ms per the device plan. */
-  coalesceMs?: number
 }>()
 
 const emit = defineEmits<{
@@ -100,31 +97,180 @@ let unregisterBuilder: (() => void) | null = null
 let wasConnected = false
 let atBottom = true
 
-/* CLI keystroke coalescing: accumulate inputs for N ms, flush as one DC
-   message. Matches the device's packet-mode semantics. */
-let sendBuf: string[] = []
-let sendTimer: ReturnType<typeof setTimeout> | null = null
-function flushSend() {
-  if (sendTimer) { clearTimeout(sendTimer); sendTimer = null }
-  if (sendBuf.length === 0) return
-  if (dc && dc.readyState === 'open') {
-    try { dc.send(sendBuf.join('')) } catch { /* drop if DC died */ }
-  }
-  sendBuf = []
+/* ── CLI input: local line editing ("cooked" mode) ────────────────────────
+ * The device runs this DataChannel client in LINE mode: it echoes nothing and
+ * executes one command per newline (it still prints the `$ ` prompt and command
+ * output). We own the line locally — echo, cursor editing and history all happen
+ * here, and only the finished line (+ '\n') crosses the wire, one DC message per
+ * command. That sidesteps every per-keystroke hazard of the old streaming model:
+ * device-side ITS-buffer drops under load, and xterm's flaky per-key IME
+ * emission. Tab-completion is intentionally not implemented here (it lives on
+ * the device's ANSI line editor, still reachable over serial / nc).
+ *
+ * Lossless send: bytes wait in `pending` and flush, in order, once the DC is
+ * open, so a line typed during a reconnect is never lost. */
+let pending = ''
+function flushPending() {
+  if (!pending || !dc || dc.readyState !== 'open') return
+  try { dc.send(pending); pending = '' } catch { /* keep buffered; retry on open */ }
 }
-function sendData(data: string) {
-  const ms = props.coalesceMs ?? 50
-  if (ms <= 0) {
-    if (dc && dc.readyState === 'open') {
-      try { dc.send(data) } catch { /* */ }
-    }
-    return
+function rawSend(data: string) { pending += data; flushPending() }
+
+/* Local line state. `cursor` is an index into `line` (0…line.length). */
+let line = ''
+let cursor = 0
+const history: string[] = []
+let histIdx = 0          // index into history; === length means the live line
+let histStash = ''       // live line saved while browsing history
+
+function echo(s: string) { term?.write(s) }
+
+function insert(s: string) {
+  const tail = line.slice(cursor)
+  line = line.slice(0, cursor) + s + tail
+  cursor += s.length
+  echo(s + tail)                                 // print insert + redrawn tail…
+  if (tail.length) echo(`\x1b[${tail.length}D`)  // …then step back over the tail
+}
+function backspace() {
+  if (cursor === 0) return
+  const tail = line.slice(cursor)
+  line = line.slice(0, cursor - 1) + tail
+  cursor--
+  echo(`\b${tail} \x1b[${tail.length + 1}D`)
+}
+function del() {                                  // forward delete
+  if (cursor >= line.length) return
+  const tail = line.slice(cursor + 1)
+  line = line.slice(0, cursor) + tail
+  echo(`${tail} \x1b[${tail.length + 1}D`)
+}
+function moveTo(pos: number) {
+  pos = Math.max(0, Math.min(line.length, pos))
+  if (pos < cursor) echo(`\x1b[${cursor - pos}D`)
+  else if (pos > cursor) echo(`\x1b[${pos - cursor}C`)
+  cursor = pos
+}
+function killToEnd() {
+  if (cursor >= line.length) return
+  line = line.slice(0, cursor)
+  echo('\x1b[K')
+}
+function killRange(from: number) {               // delete [from, cursor)
+  if (from >= cursor) return
+  const tail = line.slice(cursor)
+  line = line.slice(0, from) + tail
+  echo(`\x1b[${cursor - from}D${tail}\x1b[K`)
+  if (tail.length) echo(`\x1b[${tail.length}D`)
+  cursor = from
+}
+function killToStart() { killRange(0) }
+function killWord() {
+  let p = cursor
+  while (p > 0 && line[p - 1] === ' ') p--
+  while (p > 0 && line[p - 1] !== ' ') p--
+  killRange(p)
+}
+function replaceLine(next: string) {
+  moveTo(0)
+  echo(`\x1b[K${next}`)
+  line = next
+  cursor = next.length
+}
+function historyPrev() {
+  if (histIdx === 0) return
+  if (histIdx === history.length) histStash = line
+  replaceLine(history[--histIdx])
+}
+function historyNext() {
+  if (histIdx >= history.length) return
+  histIdx++
+  replaceLine(histIdx === history.length ? histStash : history[histIdx])
+}
+function submit() {
+  echo('\r\n')
+  const cmd = line
+  if (cmd.trim() && history[history.length - 1] !== cmd) history.push(cmd)
+  histIdx = history.length
+  histStash = ''
+  line = ''
+  cursor = 0
+  rawSend(cmd + '\n')          // device executes; empty line just re-prompts
+}
+function abort() {             // Ctrl-C: drop the line, ask for a fresh prompt
+  echo('^C\r\n')
+  line = ''
+  cursor = 0
+  histIdx = history.length
+  histStash = ''
+  rawSend('\n')
+}
+function resetLine() { line = ''; cursor = 0; histIdx = history.length; histStash = '' }
+
+function handleCtrl(code: number) {
+  switch (code) {
+    case 0x01: moveTo(0); break              // Ctrl-A  home
+    case 0x05: moveTo(line.length); break    // Ctrl-E  end
+    case 0x02: moveTo(cursor - 1); break     // Ctrl-B  left
+    case 0x06: moveTo(cursor + 1); break     // Ctrl-F  right
+    case 0x03: abort(); break                // Ctrl-C
+    case 0x0b: killToEnd(); break            // Ctrl-K
+    case 0x15: killToStart(); break          // Ctrl-U
+    case 0x17: killWord(); break             // Ctrl-W
+    case 0x10: historyPrev(); break          // Ctrl-P
+    case 0x0e: historyNext(); break          // Ctrl-N
+    /* 0x09 Tab: completion intentionally unimplemented in the browser */
+    default: break
   }
-  sendBuf.push(data)
-  /* Schedule a flush only if none pending — do NOT reset on each key. With
-   * reset semantics, sustained typing would push the flush out indefinitely
-   * and a DC reopen during that window would orphan the buffer. */
-  if (!sendTimer) sendTimer = setTimeout(flushSend, ms)
+}
+
+/* Parse one escape sequence at data[i]; return chars consumed, or 0 if not a
+ * recognised sequence (caller then stops scanning this chunk). */
+function handleEscape(data: string, i: number): number {
+  const m = /^\x1b(?:\[|O)([A-D])/.exec(data.slice(i)) ||   // CSI / SS3 arrows
+            /^\x1b\[([0-9]+)~/.exec(data.slice(i)) ||        // \x1b[3~, [1~, [4~
+            /^\x1b\[([HF])/.exec(data.slice(i))              // Home / End
+  if (!m) return 0
+  switch (m[1]) {
+    case 'A': historyPrev(); break
+    case 'B': historyNext(); break
+    case 'C': moveTo(cursor + 1); break
+    case 'D': moveTo(cursor - 1); break
+    case 'H': case '1': moveTo(0); break
+    case 'F': case '4': moveTo(line.length); break
+    case '3': del(); break
+  }
+  return m[0].length
+}
+
+function handleData(data: string) {
+  for (let i = 0; i < data.length; i++) {
+    const ch = data[i]
+    const code = data.charCodeAt(i)
+    if (ch === '\r' || ch === '\n') { submit(); continue }
+    if (code === 0x7f || ch === '\b') { backspace(); continue }
+    if (ch === '\x1b') {
+      const used = handleEscape(data, i)
+      if (!used) break          // unknown sequence — drop the rest of the chunk
+      i += used - 1
+      continue
+    }
+    if (code < 0x20) { handleCtrl(code); continue }
+    insert(ch)
+  }
+}
+
+function onInput(data: string) {
+  /* A lone control byte (Enter, Backspace, Ctrl-key) is emitted synchronously
+   * from xterm's keydown and can overtake printable letters that xterm emits on
+   * its own deferred setTimeout(0) under an IME — yielding "t<cr>op" for a typed
+   * "top<cr>". Re-defer it by one macrotask so it lands after those letters
+   * (same-delay timers fire FIFO). Paste / escape sequences (multi-byte) carry
+   * their own order and run immediately. */
+  if (data.length === 1 && (data.charCodeAt(0) < 0x20 || data.charCodeAt(0) === 0x7f))
+    setTimeout(() => handleData(data), 0)
+  else
+    handleData(data)
 }
 
 function createTerminal() {
@@ -155,7 +301,7 @@ function createTerminal() {
   })
 
   if (!props.readonly) {
-    term.onData((data: string) => sendData(data))
+    term.onData((data: string) => onInput(data))
   }
 
   resizeObserver = new ResizeObserver(() => fitAddon?.fit())
@@ -194,6 +340,8 @@ function buildChannel(pc: RTCPeerConnection) {
       term?.clear()
     }
     wasConnected = true
+    resetLine()      // device reprints its prompt; start a fresh local line
+    flushPending()   // send any line typed while the channel was down
   }
   dc.onmessage = (ev) => {
     if (!term) return
@@ -224,7 +372,7 @@ function attachSession() {
 
 function detachSession() {
   if (unregisterBuilder) { unregisterBuilder(); unregisterBuilder = null }
-  flushSend()
+  flushPending()
   if (dc) {
     const d = dc
     dc = null
