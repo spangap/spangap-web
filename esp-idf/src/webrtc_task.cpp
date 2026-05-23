@@ -15,7 +15,6 @@
 #include "webrtc_sctp.h"
 #include "storage.h"
 #include "compat.h"
-#include "pm.h"
 #include "log.h"
 #include "its.h"
 #include "tls.h"
@@ -125,9 +124,6 @@ static void dtlsLogIncomingAlertRecord(const uint8_t* buf, size_t n) {
 /* ---- Task state ---- */
 
 static TaskHandle_t webrtcHandle = nullptr;
-static pm_lock_handle_t webrtcLockLS  = nullptr;
-static pm_lock_handle_t webrtcLockCPU = nullptr;
-static bool pmHeld = false;
 
 /* Network */
 static int udpFd = -1;
@@ -337,22 +333,6 @@ static void schedulerPass() {
         }
         break;
     }
-}
-
-/* ---- PM lock helpers ---- */
-
-static void pmAcquire() {
-    if (pmHeld) return;
-    pmLockAcquire(webrtcLockLS);
-    pmLockAcquire(webrtcLockCPU);
-    pmHeld = true;
-}
-
-static void pmRelease() {
-    if (!pmHeld) return;
-    pmLockRelease(webrtcLockCPU);
-    pmLockRelease(webrtcLockLS);
-    pmHeld = false;
 }
 
 /* ---- DTLS timer callbacks ---- */
@@ -590,7 +570,6 @@ static void dtlsSessionInit() {
     mbedtls_ssl_set_timer_cb(&dtls, nullptr, dcTimerSet, webrtcTimerGet);
     mbedtls_ssl_set_export_keys_cb(&dtls, dtlsExportKeys, nullptr);
     dtlsSessionActive = true;
-    pmAcquire();
 }
 
 static void dtlsSessionFree() {
@@ -598,7 +577,6 @@ static void dtlsSessionFree() {
     dtlsSessionActive = false;
     dtlsConnected = false;
     chReasmFree();
-    pmRelease();
 }
 
 static int dtlsSctpSend(const uint8_t* pkt, size_t len, void* ctx) {
@@ -1335,7 +1313,10 @@ static void webrtcTaskFn(void*) {
 
 void webrtcInit() {
     for (int i = 0; i < DC_MAX_CHANNELS; i++) dcMap[i].handle = -1;
-    pmLockCreate(PM_NO_LIGHT_SLEEP, "webrtc", &webrtcLockLS);
-    pmLockCreate(PM_CPU_FREQ_MAX,   "webrtc", &webrtcLockCPU);
+    /* No PM locks here: webrtc-task is pure DC↔ITS plumbing and the data path is
+     * tickless-safe (DTLS/SCTP/ICE timers wake the CPU on schedule, WiFi rides
+     * WIFI_PS_MAX_MODEM through light sleep). Consumers that stream real-time
+     * media hold their own NO_LIGHT_SLEEP/CPU_FREQ_MAX locks while active
+     * (e.g. seccam's live/camera/audio). */
     webrtcHandle = spawnTask(webrtcTaskFn, "webrtc", 12288, nullptr, 2, 0);
 }
