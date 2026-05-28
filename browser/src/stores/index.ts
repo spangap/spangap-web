@@ -1,4 +1,4 @@
-// Re-export hub for diptych-browser store hooks.
+// Re-export hub for spangap-browser store hooks.
 //
 // The pinia *instance* (createPinia()) lives in the consuming app — Quasar
 // auto-installs `app/src/stores/index.ts`'s default export. defineStore()

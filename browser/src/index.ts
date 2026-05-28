@@ -1,6 +1,6 @@
-// Public API surface for diptych-browser.
+// Public API surface for spangap-browser.
 // Components, panels, and pages are imported via subpath exports
-// (diptych-browser/components/X, diptych-browser/panels/X, diptych-browser/pages/X)
+// (spangap-browser/components/X, spangap-browser/panels/X, spangap-browser/pages/X)
 // to keep tree-shaking sane. Only TS modules are re-exported here.
 
 export * from './lib/auth';

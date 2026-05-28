@@ -161,7 +161,7 @@ function formatLine(level: string, args: any[]): string {
  *  then the line is forwarded. Idempotent — guard lives on globalThis so
  *  duplicate module instances (e.g. preserveSymlinks bundling the package
  *  twice) still hook console exactly once. */
-const CONSOLE_HOOKED_KEY = Symbol.for('diptych.consoleHooked')
+const CONSOLE_HOOKED_KEY = Symbol.for('spangap.consoleHooked')
 type HookedHolder = { [CONSOLE_HOOKED_KEY]?: boolean }
 const hookedHolder = globalThis as unknown as HookedHolder
 export function installConsoleHooks() {

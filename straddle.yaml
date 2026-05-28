@@ -1,0 +1,18 @@
+# spangap-web — HTTPS + auth + WebRTC + the shared browser UI shell.
+#
+# Browser-side UI activator: when this straddle is in the dep graph (and
+# --no-web-ui is not set), the build picks up every other straddle's
+# browser/ subdir and includes its init() in the generated browser
+# dispatcher. Firmware half holds web/auth/webrtc; browser half holds
+# the shared UI shell (FloatingWindow, MenuBar, SettingX, TerminalWindow,
+# LogWindow, WebRTC session, auth flow, storage sync, menu registry,
+# Pinia stores).
+schema_version: 1
+name: spangap/spangap-web
+prefix: web
+version: 0.1.0
+firmware: esp-idf
+browser: browser
+platforms: [idf]
+requires:
+  - spangap/spangap-net

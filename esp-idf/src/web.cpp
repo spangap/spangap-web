@@ -1770,7 +1770,7 @@ void webInit() {
     webMapAddIfAbsent("/",      "/fixed/webroot", 0, 0, nullptr);
     webMapAddIfAbsent("/state", "/state",         1, 1, "admin");
     webMapAddIfAbsent("/fixed", "/fixed",         1, 1, "admin");
-#if CONFIG_DIPTYCH_SDCARD
+#if CONFIG_SPANGAP_SDCARD
     webMapAddIfAbsent("/sdcard", "/sdcard",       1, 1, "admin");
 #endif
 

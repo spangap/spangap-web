@@ -118,7 +118,7 @@ const bodySize = reactive({ w: 0, h: 0 })
 let resizeObserver: ResizeObserver | null = null
 
 /* ── persistence ── */
-const STORAGE_KEY = `diptych.win.${props.id}`
+const STORAGE_KEY = `spangap.win.${props.id}`
 
 interface StoredState {
   x: number; y: number; w: number; h: number

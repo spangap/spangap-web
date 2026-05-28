@@ -47,7 +47,7 @@ const defaultDock = isPhoneInit
   : null
 
 const BASE_FONT = 14
-const ZOOM_KEY = 'diptych.win.log.zoom'
+const ZOOM_KEY = 'spangap.win.log.zoom'
 /* Phone default starts 3 stops down (font ≈ 8px) so a packed log fits
  * in the half-screen window. Stored value, when present, wins. */
 const DEFAULT_ZOOM = isPhoneInit ? -3 : 0

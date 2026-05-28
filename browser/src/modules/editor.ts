@@ -25,5 +25,5 @@ export function closeEditor(id: string) {
   editors.splice(idx, 1)
   /* Each editor window gets a unique id, so its persisted geometry is
    * orphaned once the window closes. Drop it so localStorage doesn't grow. */
-  try { localStorage.removeItem(`diptych.win.${id}`) } catch { /* */ }
+  try { localStorage.removeItem(`spangap.win.${id}`) } catch { /* */ }
 }

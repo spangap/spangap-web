@@ -9,7 +9,7 @@ export const logVisible = ref(false)
 
 /* ── Log backlog ──
  * Number of bytes the /log WS should replay on connect. Stored in localStorage. */
-const BACKLOG_KEY = 'diptych.log.backlog'
+const BACKLOG_KEY = 'spangap.log.backlog'
 export const logBacklogBytes = ref(Number(localStorage.getItem(BACKLOG_KEY) ?? 8192) || 8192)
 function persistBacklog() {
   try { localStorage.setItem(BACKLOG_KEY, String(logBacklogBytes.value)) } catch { /* ignore */ }

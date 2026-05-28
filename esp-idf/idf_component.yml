@@ -1,0 +1,13 @@
+description: "spangap-web: HTTPS + auth + WebRTC + shared browser UI shell for spangap device apps."
+url: https://github.com/spangap/spangap-web
+version: "0.1.0"
+license: "Apache-2.0"
+targets:
+  - esp32s3
+dependencies:
+  idf:
+    version: ">=5.5"
+  # Cross-straddle deps are declared in straddle.yaml's `requires:` (and staged
+  # at consumer-build time as short-named symlinks under EXTRA_COMPONENT_DIRS),
+  # not here — listing them too would double-stage under the manager's
+  # namespaced form and cause duplicate-symbol link errors.

@@ -61,7 +61,7 @@ const defaultDock = isPhoneInit
   : null
 
 const BASE_FONT = 14
-const ZOOM_KEY = `diptych.win.${props.configPrefix}.zoom`
+const ZOOM_KEY = `spangap.win.${props.configPrefix}.zoom`
 /* 3 stops below default (font ≈ 8px) so the small docked window holds
  * useful CLI / log output on a phone. Stored value wins when present. */
 const DEFAULT_ZOOM = isPhoneInit ? -3 : 0

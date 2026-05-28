@@ -10,7 +10,7 @@ void webInit();
 /** Append a URL→filesystem mapping to s.web.map if no entry with this URL
  *  is already present. Used by modules to register their own paths during
  *  init without clobbering user customisations. webInit installs the base
- *  mappings ("/", "/state", "/fixed", and "/sdcard" if CONFIG_DIPTYCH_SDCARD)
+ *  mappings ("/", "/state", "/fixed", and "/sdcard" if CONFIG_SPANGAP_SDCARD)
  *  this way; ACME adds "/.well-known"; consumers can add app-specific
  *  prefixes from their config_defaults_cb or module init. */
 void webMapAddIfAbsent(const char* url, const char* files,

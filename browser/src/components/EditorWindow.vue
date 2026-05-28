@@ -98,7 +98,7 @@ const defaultGeom = (() => {
 
 /* Font size persisted globally for all editor windows. */
 const BASE_FONT = 14
-const ZOOM_KEY = 'diptych.win.editor.zoom'
+const ZOOM_KEY = 'spangap.win.editor.zoom'
 const stored = localStorage.getItem(ZOOM_KEY)
 const zoom = ref(stored !== null ? (Number(stored) || 0) : 0)
 const fontSize = computed(() => Math.max(8, BASE_FONT + zoom.value * 2))

@@ -1,9 +1,9 @@
 {
-  "name": "diptych-browser",
+  "name": "spangap-browser",
   "version": "0.1.0",
   "type": "module",
-  "description": "Browser-side runtime + UI for diptych device apps: WebRTC session, settings UI, FloatingWindow, log/CLI windows, default panels and pages, auth flow.",
-  "license": "MIT",
+  "description": "Browser-side runtime + UI for spangap device apps: WebRTC session, settings UI, FloatingWindow, log/CLI windows, default panels and pages, auth flow.",
+  "license": "Apache-2.0",
   "exports": {
     ".": "./src/index.ts",
     "./lib/*": "./src/lib/*.ts",
