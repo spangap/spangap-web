@@ -24,7 +24,7 @@ Declared in `esp-idf/idf_component.yml`:
 
 ### Browser build-time dependencies
 
-Declared in `browser/package.json`. The consumer app-straddle's Quasar build
+Declared in `browser/package.json`. The consumer buildable straddle's Quasar build
 bundles these into the served SPA:
 
 | Package | License |
