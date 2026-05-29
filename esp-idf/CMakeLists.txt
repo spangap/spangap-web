@@ -1,17 +1,15 @@
 file(GLOB WEB_SRCS "src/*.cpp")
 
-# webrtc_task asks upnp for the external IP (gated by CONFIG_SPANGAP_UPNP);
-# REQUIRES upnp at the CMake level for header visibility. Plan-aligned
-# future inverts this (upnp's browser/lcd panels decorate web), but for
-# now the direct call survives.
+# Cross-straddle REQUIRES come through spangap_requires.cmake (auto-generated
+# by spangap-inside). spangap-core/-net/upnp are declared in straddle.yaml's
+# requires:. spangap-lcd is intentionally NOT listed — spangap-web has no
+# direct lcd.h dep today.
+include(${CMAKE_CURRENT_LIST_DIR}/spangap_requires.cmake)
 idf_component_register(
     SRCS ${WEB_SRCS}
     INCLUDE_DIRS "include"
     REQUIRES
-        spangap-core
-        spangap-net
-        spangap-lcd
-        upnp
+        ${SPANGAP_REQUIRES}
         esp_event
         esp_netif
         lwip
