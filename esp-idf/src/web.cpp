@@ -1492,6 +1492,10 @@ static bool trySendBody(int h) {
 
 /* ---- Task function ---- */
 
+/* Defined in auth_web.cpp — registers the auth URL prefix handler. Called
+ * once from webTaskFn after the URL-handler dispatch table is ready. */
+extern "C" void authWebInit();
+
 static void webTaskFn(void* arg) {
     webMaxHandles = storageGetInt("s.web.max_connections", 8);
     if (webMaxHandles < 2) webMaxHandles = 2;
@@ -1513,7 +1517,9 @@ static void webTaskFn(void* arg) {
 
     loadMappings();
     loadMimeTypes();
-    authInit();
+    /* auth core (storage defaults, CLI, login/passwd/logout API) was already
+     * brought up by spangapInit(). authWebInit just wires the HTTP face. */
+    authWebInit();
 
     storageSubscribeChanges("s.web.", ON_CHANGE {
         loadMappings();
