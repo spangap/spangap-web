@@ -357,6 +357,16 @@ function buildChannel(pc: RTCPeerConnection) {
   }
   dc.onclose = () => {
     dc = null
+    /* Device closed just this channel (e.g. the CLI exited on `exit`) while
+     * the session itself is still up: the DC is gone for good, so close the
+     * window. When the channel instead drops because the whole session is
+     * tearing down to reconnect, state has already left 'connected' by the
+     * time this queued onclose runs — keep the window so it reattaches its
+     * DC on the next peer connection. */
+    if (getSession().state === 'connected') {
+      emit('update:visible', false)
+      return
+    }
     if (wasConnected) {
       term?.writeln('\r\n\x1b[31m── channel closed ──\x1b[0m')
     }
