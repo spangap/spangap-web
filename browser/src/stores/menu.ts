@@ -5,7 +5,7 @@ export interface MenuItem {
   id: string
   label: string
   type: 'panel' | 'toggle' | 'submenu' | 'action'
-  order: number
+  order?: number
   component?: Component        // for type === 'panel'
   key?: string                 // for type === 'toggle' (device store dotpath)
   children?: MenuItem[]        // for type === 'submenu'
@@ -18,7 +18,7 @@ export interface MenuItem {
 export interface MenuGroup {
   id: string
   label: string
-  order: number
+  order?: number
   items: MenuItem[]
   activeLabel?: string      // label shown in menu bar when this panel is active
   onClose?: () => void      // called when active panel's menu button is clicked (to dismiss)
@@ -36,15 +36,15 @@ export const useMenuStore = defineStore('menu', () => {
       if (existing && existing.type === 'submenu' && item.type === 'submenu') {
         existing.children ??= []
         mergeItems(existing.children, item.children ?? [])
-        existing.children.sort((a, b) => a.order - b.order)
+        existing.children.sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity) || a.label.localeCompare(b.label))
       } else {
         target.push(item)
       }
     }
-    target.sort((a, b) => a.order - b.order)
+    target.sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity) || a.label.localeCompare(b.label))
   }
 
-  function register(menuId: string, label: string, order: number, items: MenuItem[], options?: { activeLabel?: string, onClose?: () => void, hidden?: () => boolean }) {
+  function register(menuId: string, label: string, items: MenuItem[], options?: { activeLabel?: string, onClose?: () => void, hidden?: () => boolean }) {
     const existing = menus.get(menuId)
     if (existing) {
       mergeItems(existing.items, items)
@@ -52,12 +52,12 @@ export const useMenuStore = defineStore('menu', () => {
     } else {
       const fresh: MenuItem[] = []
       mergeItems(fresh, items)
-      menus.set(menuId, { id: menuId, label, order, items: fresh, ...options })
+      menus.set(menuId, { id: menuId, label, items: fresh, ...options })
     }
   }
 
   const sortedMenus = computed(() =>
-    [...menus.values()].sort((a, b) => a.order - b.order),
+    [...menus.values()].sort((a, b) => (a.order ?? Infinity) - (b.order ?? Infinity) || a.label.localeCompare(b.label)),
   )
 
   function openPanel(id: string) {

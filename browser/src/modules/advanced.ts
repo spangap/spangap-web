@@ -129,30 +129,28 @@ const EDIT_FILES: Array<[string, string]> = [
 ]
 
 export function registerAdvanced() {
-  useMenuStore().register('advanced', 'Advanced', 90, [
-    { id: 'adv.cli', label: 'Show CLI', type: 'action', order: 10,
+  useMenuStore().register('advanced', 'Advanced', [
+    { id: 'adv.cli', label: 'Show CLI', type: 'action',
       action: () => { cliVisible.value = !cliVisible.value } },
-    { id: 'adv.log', label: 'Show Log', type: 'action', order: 20,
+    { id: 'adv.log', label: 'Show Log', type: 'action',
       action: () => { logVisible.value = !logVisible.value } },
-    { id: 'adv.backlog', label: 'Backlog Size', type: 'submenu', order: 25,
+    { id: 'adv.backlog', label: 'Backlog Size', type: 'submenu',
       children: BACKLOG_PRESETS.map(([label, bytes], i) => ({
         id: `adv.backlog.${bytes}`,
         label,
         type: 'action' as const,
-        order: (i + 1) * 10,
         action: () => { logBacklogBytes.value = bytes; persistBacklog() },
       })),
     },
-    { id: 'adv.edit', label: 'Edit', type: 'submenu', order: 27,
+    { id: 'adv.edit', label: 'Edit', type: 'submenu',
       children: EDIT_FILES.map(([name, path], i) => ({
         id: `adv.edit.${name}`,
         label: name,
         type: 'action' as const,
-        order: (i + 1) * 10,
         action: () => { openEditor(path, name) },
         disabled: () => isPathOpen(path),
       })),
     },
-    { id: 'adv.dev', label: 'Developer Options', type: 'panel', order: 30, component: DeveloperPanel },
+    { id: 'adv.dev', label: 'Developer Options', type: 'panel', component: DeveloperPanel },
   ])
 }
