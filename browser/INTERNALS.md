@@ -71,7 +71,7 @@ hard-coded list anywhere.
 ## Conventions for adding panels
 
 Place app-specific panels in the **consuming app**'s tree (e.g.
-`reticulous-tdeck/web-interface/src/`) when they are app-only. Place
+`hw-tdeck/web-interface/src/`) when they are app-only. Place
 straddle-owned panels in *that straddle's* `browser/src/panels/` and
 register them from `browser/src/modules/<prefix>.ts`.
 

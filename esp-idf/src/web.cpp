@@ -1698,18 +1698,18 @@ static void webTaskFn(void* arg) {
 }
 
 static void cmdWeb(const char* a) {
-    if (strcmp(a, "help") == 0) { cliPrintf("  %-*s show web server routes\n", CLI_HELP_COL, "web"); return; }
+    if (cliWantsHelp(a)) { cliPrintf("%-*s show web server routes\n", CLI_HELP_COL, "web"); return; }
     cliPrintf("file mappings:\n");
     for (int i = 0; i < webMapCount; i++)
-        cliPrintf("  %s%s -> %s%s%s\n", webMaps[i].url.empty() ? "" : "/", webMaps[i].url.c_str(), webMaps[i].files.c_str(),
+        cliPrintf("%s%s -> %s%s%s\n", webMaps[i].url.empty() ? "" : "/", webMaps[i].url.c_str(), webMaps[i].files.c_str(),
                   webMaps[i].dirIndex ? " [index]" : "", webMaps[i].dav ? " [dav]" : "");
     cliPrintf("registered paths:\n");
     for (int i = 0; i < webPathCount; i++) {
         if (webPaths[i].kind == WEB_PATH_FORWARD)
-            cliPrintf("  /%s -> [%s]:%d\n", webPaths[i].path,
+            cliPrintf("/%s -> [%s]:%d\n", webPaths[i].path,
                       pcTaskGetName(webPaths[i].fwd.task), webPaths[i].fwd.itsPort);
         else
-            cliPrintf("  /%s -> handler\n", webPaths[i].path);
+            cliPrintf("/%s -> handler\n", webPaths[i].path);
     }
 }
 
