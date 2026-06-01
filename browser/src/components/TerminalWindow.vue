@@ -97,18 +97,16 @@ let unregisterBuilder: (() => void) | null = null
 let wasConnected = false
 let atBottom = true
 
-/* ── CLI input: local line editing ("cooked" mode) ────────────────────────
- * The device runs this DataChannel client in LINE mode: it echoes nothing and
- * executes one command per newline (it still prints the `$ ` prompt and command
- * output). We own the line locally — echo, cursor editing and history all happen
- * here, and only the finished line (+ '\n') crosses the wire, one DC message per
- * command. That sidesteps every per-keystroke hazard of the old streaming model:
- * device-side ITS-buffer drops under load, and xterm's flaky per-key IME
- * emission. Tab-completion is intentionally not implemented here (it lives on
- * the device's ANSI line editor, still reachable over serial / nc).
+/* ── CLI input: dumb terminal ─────────────────────────────────────────────
+ * The device runs this DataChannel client in CLI_ANSI mode: the device line
+ * editor (or, during an interactive ssh shell, the remote pty) owns echo, line
+ * editing, history and tab-completion, emitting ANSI that xterm renders. We
+ * echo nothing locally — every keystroke is forwarded verbatim and all received
+ * bytes go straight to xterm. (No more local line editor / private raw-mode
+ * OSC: the far end is always the echoer, so there's nothing to toggle.)
  *
  * Lossless send: bytes wait in `pending` and flush, in order, once the DC is
- * open, so a line typed during a reconnect is never lost. */
+ * open, so a key pressed during a reconnect is never lost. */
 let pending = ''
 function flushPending() {
   if (!pending || !dc || dc.readyState !== 'open') return
@@ -116,181 +114,7 @@ function flushPending() {
 }
 function rawSend(data: string) { pending += data; flushPending() }
 
-/* Local line state. `cursor` is an index into `line` (0…line.length). */
-let line = ''
-let cursor = 0
-const history: string[] = []
-let histIdx = 0          // index into history; === length means the live line
-let histStash = ''       // live line saved while browsing history
-
-/* Raw passthrough mode. The device sends a private OSC (5379) to flip this when
- * an interactive remote session is active (e.g. an `ssh` login shell): ESC]5379;1 BEL
- * to enter, ESC]5379;0 BEL to leave. In raw mode the remote pty owns echo and
- * line editing, so we send every keystroke verbatim and do NO local echo — else
- * each command would appear twice (local + remote). Restores cooked line mode
- * on exit. */
-let rawMode = false
-const RAW_ON = '\x1b]5379;1\x07'
-const RAW_OFF = '\x1b]5379;0\x07'
-function setRawMode(on: boolean) {
-  if (rawMode === on) return
-  rawMode = on
-  resetLine()            // drop any half-typed local line across the switch
-}
-/* Pull any raw-mode OSC markers out of a device→client chunk, toggling mode,
- * and return the text with them removed (they must never reach xterm). */
-function stripRawMarkers(text: string): string {
-  if (text.indexOf('\x1b]5379;') === -1) return text
-  let out = '', i = 0
-  while (i < text.length) {
-    if (text.startsWith(RAW_ON, i))  { setRawMode(true);  i += RAW_ON.length;  continue }
-    if (text.startsWith(RAW_OFF, i)) { setRawMode(false); i += RAW_OFF.length; continue }
-    out += text[i++]
-  }
-  return out
-}
-
-function echo(s: string) { term?.write(s) }
-
-function insert(s: string) {
-  const tail = line.slice(cursor)
-  line = line.slice(0, cursor) + s + tail
-  cursor += s.length
-  echo(s + tail)                                 // print insert + redrawn tail…
-  if (tail.length) echo(`\x1b[${tail.length}D`)  // …then step back over the tail
-}
-function backspace() {
-  if (cursor === 0) return
-  const tail = line.slice(cursor)
-  line = line.slice(0, cursor - 1) + tail
-  cursor--
-  echo(`\b${tail} \x1b[${tail.length + 1}D`)
-}
-function del() {                                  // forward delete
-  if (cursor >= line.length) return
-  const tail = line.slice(cursor + 1)
-  line = line.slice(0, cursor) + tail
-  echo(`${tail} \x1b[${tail.length + 1}D`)
-}
-function moveTo(pos: number) {
-  pos = Math.max(0, Math.min(line.length, pos))
-  if (pos < cursor) echo(`\x1b[${cursor - pos}D`)
-  else if (pos > cursor) echo(`\x1b[${pos - cursor}C`)
-  cursor = pos
-}
-function killToEnd() {
-  if (cursor >= line.length) return
-  line = line.slice(0, cursor)
-  echo('\x1b[K')
-}
-function killRange(from: number) {               // delete [from, cursor)
-  if (from >= cursor) return
-  const tail = line.slice(cursor)
-  line = line.slice(0, from) + tail
-  echo(`\x1b[${cursor - from}D${tail}\x1b[K`)
-  if (tail.length) echo(`\x1b[${tail.length}D`)
-  cursor = from
-}
-function killToStart() { killRange(0) }
-function killWord() {
-  let p = cursor
-  while (p > 0 && line[p - 1] === ' ') p--
-  while (p > 0 && line[p - 1] !== ' ') p--
-  killRange(p)
-}
-function replaceLine(next: string) {
-  moveTo(0)
-  echo(`\x1b[K${next}`)
-  line = next
-  cursor = next.length
-}
-function historyPrev() {
-  if (histIdx === 0) return
-  if (histIdx === history.length) histStash = line
-  replaceLine(history[--histIdx])
-}
-function historyNext() {
-  if (histIdx >= history.length) return
-  histIdx++
-  replaceLine(histIdx === history.length ? histStash : history[histIdx])
-}
-function submit() {
-  echo('\r\n')
-  const cmd = line
-  if (cmd.trim() && history[history.length - 1] !== cmd) history.push(cmd)
-  histIdx = history.length
-  histStash = ''
-  line = ''
-  cursor = 0
-  rawSend(cmd + '\n')          // device executes; empty line just re-prompts
-}
-function abort() {             // Ctrl-C: drop the line, ask for a fresh prompt
-  echo('^C\r\n')
-  line = ''
-  cursor = 0
-  histIdx = history.length
-  histStash = ''
-  rawSend('\n')
-}
-function resetLine() { line = ''; cursor = 0; histIdx = history.length; histStash = '' }
-
-function handleCtrl(code: number) {
-  switch (code) {
-    case 0x01: moveTo(0); break              // Ctrl-A  home
-    case 0x05: moveTo(line.length); break    // Ctrl-E  end
-    case 0x02: moveTo(cursor - 1); break     // Ctrl-B  left
-    case 0x06: moveTo(cursor + 1); break     // Ctrl-F  right
-    case 0x03: abort(); break                // Ctrl-C
-    case 0x0b: killToEnd(); break            // Ctrl-K
-    case 0x15: killToStart(); break          // Ctrl-U
-    case 0x17: killWord(); break             // Ctrl-W
-    case 0x10: historyPrev(); break          // Ctrl-P
-    case 0x0e: historyNext(); break          // Ctrl-N
-    /* 0x09 Tab: completion intentionally unimplemented in the browser */
-    default: break
-  }
-}
-
-/* Parse one escape sequence at data[i]; return chars consumed, or 0 if not a
- * recognised sequence (caller then stops scanning this chunk). */
-function handleEscape(data: string, i: number): number {
-  const m = /^\x1b(?:\[|O)([A-D])/.exec(data.slice(i)) ||   // CSI / SS3 arrows
-            /^\x1b\[([0-9]+)~/.exec(data.slice(i)) ||        // \x1b[3~, [1~, [4~
-            /^\x1b\[([HF])/.exec(data.slice(i))              // Home / End
-  if (!m) return 0
-  switch (m[1]) {
-    case 'A': historyPrev(); break
-    case 'B': historyNext(); break
-    case 'C': moveTo(cursor + 1); break
-    case 'D': moveTo(cursor - 1); break
-    case 'H': case '1': moveTo(0); break
-    case 'F': case '4': moveTo(line.length); break
-    case '3': del(); break
-  }
-  return m[0].length
-}
-
-function handleData(data: string) {
-  for (let i = 0; i < data.length; i++) {
-    const ch = data[i]
-    const code = data.charCodeAt(i)
-    if (ch === '\r' || ch === '\n') { submit(); continue }
-    if (code === 0x7f || ch === '\b') { backspace(); continue }
-    if (ch === '\x1b') {
-      const used = handleEscape(data, i)
-      if (!used) break          // unknown sequence — drop the rest of the chunk
-      i += used - 1
-      continue
-    }
-    if (code < 0x20) { handleCtrl(code); continue }
-    insert(ch)
-  }
-}
-
 function onInput(data: string) {
-  /* Raw mode: forward keystrokes verbatim (incl. control + escape sequences);
-   * the remote pty echoes and does the line editing. No local echo. */
-  if (rawMode) { rawSend(data); return }
   /* A lone control byte (Enter, Backspace, Ctrl-key) is emitted synchronously
    * from xterm's keydown and can overtake printable letters that xterm emits on
    * its own deferred setTimeout(0) under an IME — yielding "t<cr>op" for a typed
@@ -298,9 +122,9 @@ function onInput(data: string) {
    * (same-delay timers fire FIFO). Paste / escape sequences (multi-byte) carry
    * their own order and run immediately. */
   if (data.length === 1 && (data.charCodeAt(0) < 0x20 || data.charCodeAt(0) === 0x7f))
-    setTimeout(() => handleData(data), 0)
+    setTimeout(() => rawSend(data), 0)
   else
-    handleData(data)
+    rawSend(data)
 }
 
 function createTerminal() {
@@ -370,9 +194,7 @@ function buildChannel(pc: RTCPeerConnection) {
       term?.clear()
     }
     wasConnected = true
-    rawMode = false  // a fresh session starts cooked; the device re-arms raw if needed
-    resetLine()      // device reprints its prompt; start a fresh local line
-    flushPending()   // send any line typed while the channel was down
+    flushPending()   // send any key pressed while the channel was down
   }
   dc.onmessage = (ev) => {
     if (!term) return
@@ -381,7 +203,7 @@ function buildChannel(pc: RTCPeerConnection) {
       : new TextDecoder().decode(ev.data instanceof ArrayBuffer
           ? ev.data
           : (ev.data as Uint8Array).buffer)
-    term.write(stripRawMarkers(raw))
+    term.write(raw)
     const buf = term.buffer.active
     atBottom = buf.viewportY >= buf.baseY
     if (!atBottom) fwRef.value?.flashTitleBar()
