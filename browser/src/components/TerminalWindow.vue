@@ -123,6 +123,33 @@ const history: string[] = []
 let histIdx = 0          // index into history; === length means the live line
 let histStash = ''       // live line saved while browsing history
 
+/* Raw passthrough mode. The device sends a private OSC (5379) to flip this when
+ * an interactive remote session is active (e.g. an `ssh` login shell): ESC]5379;1 BEL
+ * to enter, ESC]5379;0 BEL to leave. In raw mode the remote pty owns echo and
+ * line editing, so we send every keystroke verbatim and do NO local echo — else
+ * each command would appear twice (local + remote). Restores cooked line mode
+ * on exit. */
+let rawMode = false
+const RAW_ON = '\x1b]5379;1\x07'
+const RAW_OFF = '\x1b]5379;0\x07'
+function setRawMode(on: boolean) {
+  if (rawMode === on) return
+  rawMode = on
+  resetLine()            // drop any half-typed local line across the switch
+}
+/* Pull any raw-mode OSC markers out of a device→client chunk, toggling mode,
+ * and return the text with them removed (they must never reach xterm). */
+function stripRawMarkers(text: string): string {
+  if (text.indexOf('\x1b]5379;') === -1) return text
+  let out = '', i = 0
+  while (i < text.length) {
+    if (text.startsWith(RAW_ON, i))  { setRawMode(true);  i += RAW_ON.length;  continue }
+    if (text.startsWith(RAW_OFF, i)) { setRawMode(false); i += RAW_OFF.length; continue }
+    out += text[i++]
+  }
+  return out
+}
+
 function echo(s: string) { term?.write(s) }
 
 function insert(s: string) {
@@ -261,6 +288,9 @@ function handleData(data: string) {
 }
 
 function onInput(data: string) {
+  /* Raw mode: forward keystrokes verbatim (incl. control + escape sequences);
+   * the remote pty echoes and does the line editing. No local echo. */
+  if (rawMode) { rawSend(data); return }
   /* A lone control byte (Enter, Backspace, Ctrl-key) is emitted synchronously
    * from xterm's keydown and can overtake printable letters that xterm emits on
    * its own deferred setTimeout(0) under an IME — yielding "t<cr>op" for a typed
@@ -340,17 +370,18 @@ function buildChannel(pc: RTCPeerConnection) {
       term?.clear()
     }
     wasConnected = true
+    rawMode = false  // a fresh session starts cooked; the device re-arms raw if needed
     resetLine()      // device reprints its prompt; start a fresh local line
     flushPending()   // send any line typed while the channel was down
   }
   dc.onmessage = (ev) => {
     if (!term) return
-    const text = typeof ev.data === 'string'
+    const raw = typeof ev.data === 'string'
       ? ev.data
       : new TextDecoder().decode(ev.data instanceof ArrayBuffer
           ? ev.data
           : (ev.data as Uint8Array).buffer)
-    term.write(text)
+    term.write(stripRawMarkers(raw))
     const buf = term.buffer.active
     atBottom = buf.viewportY >= buf.baseY
     if (!atBottom) fwRef.value?.flashTitleBar()
