@@ -171,22 +171,14 @@ export const useDeviceStore = defineStore('device', () => {
       set('sys.time.set', epoch)
     }
 
-    /* Push browser timezone if not yet configured (IANA name + POSIX lookup) */
+    /* Push browser timezone if not yet configured. We send only the IANA
+     * name — the device resolves the POSIX string itself from its on-disk
+     * timezones.json (the zones map no longer lives in config). */
     const tz = settings.s?.ntp?.tz
     if (tz === undefined || tz === '') {
       try {
         const ianaName = Intl.DateTimeFormat().resolvedOptions().timeZone
-        if (ianaName) {
-          set('s.ntp.tz', ianaName)
-          /* Look up POSIX string from zones tree */
-          const parts = ianaName.split('/')
-          let node: any = settings.s?.time?.zones
-          for (const p of parts) {
-            if (!node || typeof node !== 'object') break
-            node = node[p]
-          }
-          if (typeof node === 'string') set('s.ntp.posix', node)
-        }
+        if (ianaName) set('s.ntp.tz', ianaName)
       } catch { /* Intl not available */ }
     }
 
@@ -195,7 +187,11 @@ export const useDeviceStore = defineStore('device', () => {
   }
 
   function updateZonesIfStale() {
-    const deviceEtag = String(settings.s?.time?.zones?.updated ?? '')
+    /* The device's IANA→POSIX map is a plain file at /state/timezones.json,
+     * no longer a config subtree. We track the version we last uploaded in
+     * the tiny s.ntp.zones_etag config key (so the big map stays out of the
+     * config dump) and, when GitHub's copy is newer, PUT a fresh file. */
+    const deviceEtag = String(settings.s?.ntp?.zones_etag ?? '')
 
     /* HEAD request to check ETag without downloading full file */
     fetch(ZONES_URL, { method: 'HEAD', cache: 'no-cache' })
@@ -204,7 +200,7 @@ export const useDeviceStore = defineStore('device', () => {
         const ghEtag = r.headers.get('ETag') ?? ''
         if (!ghEtag) return
         if (deviceEtag === ghEtag) return  /* already current */
-        /* ETag changed — download and push */
+        /* ETag changed — download, reshape to the nested tree, PUT to device */
         return fetch(ZONES_URL, { cache: 'no-cache' })
           .then(r2 => r2.ok ? r2.json() : null)
           .then(flat => {
@@ -218,8 +214,19 @@ export const useDeviceStore = defineStore('device', () => {
               node[parts[parts.length - 1]] = posix
             }
             nested.updated = ghEtag
-            sendJson({ s: { time: { zones: nested } } })
-            console.log(`[device] timezone zones updated (${Object.keys(flat).length} zones)`)
+            return fetch('/state/timezones.json', {
+              method: 'PUT',
+              credentials: 'same-origin',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(nested),
+            }).then(put => {
+              if (!put.ok) {
+                console.warn(`[device] timezone PUT failed (${put.status})`)
+                return
+              }
+              set('s.ntp.zones_etag', ghEtag)
+              console.log(`[device] timezone zones updated (${Object.keys(flat).length} zones)`)
+            })
           })
       })
       .catch(() => { /* offline — use existing zones */ })

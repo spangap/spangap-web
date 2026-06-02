@@ -30,42 +30,44 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onMounted } from 'vue'
 import { useDeviceStore } from '../stores/device'
 
 const device = useDeviceStore()
 
 const currentTz = computed(() => String(device.get('s.ntp.tz') ?? ''))
 
-/** Build timezone options from s.time.zones tree on the device. */
-const tzOptions = computed(() => {
-  const zones = device.get('s.time.zones')
-  if (!zones || typeof zones !== 'object') return []
-  const opts: { label: string; value: string }[] = []
-  for (const [continent, cities] of Object.entries(zones as Record<string, any>)) {
-    if (continent === 'updated' || typeof cities !== 'object') continue
-    for (const [city, posix] of Object.entries(cities as Record<string, any>)) {
-      if (typeof posix !== 'string') {
-        /* Sub-region like America/Argentina/Buenos_Aires */
-        if (typeof posix === 'object') {
-          for (const [sub, val] of Object.entries(posix as Record<string, string>)) {
-            const iana = `${continent}/${city}/${sub}`
-            opts.push({ label: iana.replace(/_/g, ' '), value: iana })
-          }
-        }
-        continue
-      }
-      const iana = `${continent}/${city}`
-      opts.push({ label: iana.replace(/_/g, ' '), value: iana })
-    }
+/* The IANA→POSIX map no longer lives in config — it's a plain file on the
+ * device at /state/timezones.json. Fetch it once to populate the dropdown.
+ * onTzChange sends only s.ntp.tz; the device resolves POSIX from that file. */
+const tzOptions = ref<{ label: string; value: string }[]>([])
+
+function collectZones(node: any, prefix: string, out: { label: string; value: string }[]) {
+  for (const [name, val] of Object.entries(node as Record<string, any>)) {
+    if (name === 'updated') continue
+    const iana = prefix ? `${prefix}/${name}` : name
+    if (typeof val === 'string') out.push({ label: iana.replace(/_/g, ' '), value: iana })
+    else if (val && typeof val === 'object') collectZones(val, iana, out)
   }
-  opts.sort((a, b) => a.label.localeCompare(b.label))
-  return opts
+}
+
+onMounted(async () => {
+  try {
+    const r = await fetch('/state/timezones.json', { credentials: 'same-origin', cache: 'no-cache' })
+    if (!r.ok) return
+    const zones = await r.json()
+    if (!zones || typeof zones !== 'object') return
+    const opts: { label: string; value: string }[] = []
+    collectZones(zones, '', opts)
+    opts.sort((a, b) => a.label.localeCompare(b.label))
+    tzOptions.value = opts
+    filteredTzOptions.value = opts
+  } catch { /* offline — leave dropdown empty */ }
 })
 
 const filteredTzOptions = ref<{ label: string; value: string }[]>([])
 
-watch(tzOptions, () => { filteredTzOptions.value = tzOptions.value }, { immediate: true })
+watch(tzOptions, () => { filteredTzOptions.value = tzOptions.value })
 
 function filterTz(val: string, update: (fn: () => void) => void) {
   update(() => {
@@ -78,13 +80,5 @@ function filterTz(val: string, update: (fn: () => void) => void) {
 
 function onTzChange(ianaName: string) {
   device.set('s.ntp.tz', ianaName)
-  /* Look up POSIX string from the zones tree and send alongside */
-  const parts = ianaName.split('/')
-  let node: any = device.get('s.time.zones')
-  for (const p of parts) {
-    if (!node || typeof node !== 'object') break
-    node = node[p]
-  }
-  if (typeof node === 'string') device.set('s.ntp.posix', node)
 }
 </script>
