@@ -20,3 +20,12 @@ requires:
   # discovery; today that makes upnp a hard dep. Could become
   # optional_requires once the call site is gated on CONFIG_SPANGAP_UPNP.
   - spangap/upnp
+# Auto-init: folded into the generated spangapInitStraddles() dispatcher, so a
+# --no-web build (spangap-web not staged) simply emits no call — no #if
+# CONFIG_SPANGAP_WEB guard in the consumer. webrtc depends on web being up, so
+# it sorts after it; storageInit (spangap-core, order 75) lands between them.
+init:
+  - call: webInit
+    order: 70
+  - call: webrtcInit
+    order: 80
