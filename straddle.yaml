@@ -17,8 +17,8 @@ platforms: [idf]
 requires:
   - spangap/spangap-net
   # webrtc_task.cpp unconditionally #include's "upnp.h" for external-IP
-  # discovery; today that makes upnp a hard dep. Could become
-  # optional_requires once the call site is gated on CONFIG_SPANGAP_UPNP.
+  # discovery; today that makes upnp a hard dep. Could become an
+  # additional_installs entry once the call site is gated on CONFIG_SPANGAP_UPNP.
   - spangap/upnp
 # Auto-init: folded into the generated spangapInitStraddles() dispatcher, so a
 # --no-web build (spangap-web not staged) simply emits no call — no #if

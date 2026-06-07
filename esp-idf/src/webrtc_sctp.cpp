@@ -206,17 +206,54 @@ static size_t buildCookieAck(sctp_assoc_t* a, uint8_t* out) {
     return pos;
 }
 
-/* ---- SACK ---- */
-
+/* ---- SACK ----
+   Report the cumulative TSN ack point (a->peerTsn) plus a Gap Ack Block for
+   each contiguous run of out-of-order chunks sitting in the reorder buffer.
+   Without the gap blocks the peer would keep retransmitting TSNs we already
+   hold; without an honest cumulative point it would stop retransmitting ones
+   we're still missing. */
 static size_t buildSack(sctp_assoc_t* a, uint8_t* out) {
+    /* Gather buffered TSNs and insertion-sort ascending (≤ SCTP_REORDER_SLOTS,
+       so O(n²) is fine). */
+    uint32_t tsns[SCTP_REORDER_SLOTS];
+    int n = 0;
+    for (int i = 0; i < SCTP_REORDER_SLOTS; i++) {
+        if (!a->reorder[i].used) continue;
+        uint32_t t = a->reorder[i].tsn;
+        int j = n++;
+        while (j > 0 && (int32_t)(tsns[j - 1] - t) > 0) { tsns[j] = tsns[j - 1]; j--; }
+        tsns[j] = t;
+    }
+
     size_t pos = writeHeader(out, a->myPort, a->peerPort, a->peerTag);
+    size_t chunkStart = pos;
     out[pos++] = SCTP_SACK;
     out[pos++] = 0;
-    w16(out + pos, 16); pos += 2;
-    w32(out + pos, a->peerTsn); pos += 4;
-    w32(out + pos, 65535); pos += 4;
-    w16(out + pos, 0); pos += 2;
-    w16(out + pos, 0); pos += 2;
+    size_t lenPos = pos; pos += 2;          /* chunk length — filled below */
+    w32(out + pos, a->peerTsn); pos += 4;   /* cumulative TSN ack */
+    w32(out + pos, 65535); pos += 4;        /* a_rwnd (we don't gate inbound) */
+    size_t gapCountPos = pos; pos += 2;     /* number of gap ack blocks */
+    w16(out + pos, 0); pos += 2;            /* number of duplicate TSNs (none) */
+
+    /* Coalesce the sorted TSNs into contiguous runs; each run is one gap
+       block, expressed as start/end offsets from the cumulative point. */
+    uint16_t numGaps = 0;
+    int i = 0;
+    while (i < n) {
+        uint32_t runLo = tsns[i];
+        uint32_t runHi = tsns[i];
+        while (i + 1 < n && tsns[i + 1] == runHi + 1) { runHi = tsns[++i]; }
+        i++;
+        int32_t startOff = (int32_t)(runLo - a->peerTsn);
+        int32_t endOff   = (int32_t)(runHi - a->peerTsn);
+        if (startOff < 1) continue;          /* already covered by cum — skip */
+        if (endOff > 65535) endOff = 65535;  /* offsets are 16-bit (RFC 4960) */
+        w16(out + pos, (uint16_t)startOff); pos += 2;
+        w16(out + pos, (uint16_t)endOff);   pos += 2;
+        numGaps++;
+    }
+    w16(out + gapCountPos, numGaps);
+    w16(out + lenPos, (uint16_t)(pos - chunkStart));
     sctpSetChecksum(out, pos);
     return pos;
 }
@@ -673,6 +710,92 @@ static void processDataFragment(sctp_assoc_t* a, uint16_t streamId,
     }
 }
 
+/* ---- Inbound reorder buffer ---- */
+
+static int reorderFind(sctp_assoc_t* a, uint32_t tsn) {
+    for (int i = 0; i < SCTP_REORDER_SLOTS; i++)
+        if (a->reorder[i].used && a->reorder[i].tsn == tsn) return i;
+    return -1;
+}
+
+static void reorderFreeSlot(sctp_assoc_t* a, int i) {
+    if (!a->reorder[i].used) return;
+    if (a->reorder[i].data) { heap_caps_free(a->reorder[i].data); a->reorder[i].data = nullptr; }
+    a->reorder[i].used = false;
+    a->reorder[i].dataLen = 0;
+    if (a->reorderCount > 0) a->reorderCount--;
+}
+
+static void sctpReorderFree(sctp_assoc_t* a) {
+    for (int i = 0; i < SCTP_REORDER_SLOTS; i++) reorderFreeSlot(a, i);
+    a->reorderCount = 0;
+}
+
+/* Buffer one out-of-order chunk. Returns false (chunk dropped, caller leaves
+   it un-acked so the reliable peer retransmits) when no slot is free or the
+   PSRAM copy fails. Duplicates already buffered are silently accepted. */
+static bool reorderInsert(sctp_assoc_t* a, uint32_t tsn, uint16_t streamId,
+                          uint32_t ppid, uint8_t flags,
+                          const uint8_t* data, size_t dataLen) {
+    if (reorderFind(a, tsn) >= 0) return true;   /* already holding it */
+    int slot = -1;
+    for (int i = 0; i < SCTP_REORDER_SLOTS; i++)
+        if (!a->reorder[i].used) { slot = i; break; }
+    if (slot < 0) return false;                  /* pool full — drop, peer resends */
+
+    uint8_t* buf = nullptr;
+    if (dataLen > 0) {
+        buf = (uint8_t*)heap_caps_malloc(dataLen, MALLOC_CAP_SPIRAM);
+        if (!buf) return false;
+        memcpy(buf, data, dataLen);
+    }
+    sctp_reorder_t& e = a->reorder[slot];
+    e.used     = true;
+    e.tsn      = tsn;
+    e.streamId = streamId;
+    e.ppid     = ppid;
+    e.flags    = flags;
+    e.data     = buf;
+    e.dataLen  = dataLen;
+    a->reorderCount++;
+    return true;
+}
+
+/* Dispatch one in-order chunk to its handler. Returns the length of a DCEP
+   ACK packet built into `out` (>0) when the chunk was a DCEP OPEN, else 0. */
+static size_t deliverChunk(sctp_assoc_t* a, uint16_t streamId, uint32_t ppid,
+                           uint8_t flags, const uint8_t* data, size_t dataLen,
+                           uint8_t* out) {
+    if (ppid == PPID_DCEP && dataLen > 0 && data[0] == DCEP_OPEN)
+        return handleDcepOpen(a, streamId, data, dataLen, out);
+    if (ppid != PPID_DCEP)
+        processDataFragment(a, streamId, ppid, flags, data, dataLen);
+    return 0;
+}
+
+/* After the cumulative TSN advances, deliver any buffered chunks that have
+   now become contiguous, advancing peerTsn across each. Returns the last
+   DCEP ACK length produced (0 if none) so the caller can forward it. */
+static size_t drainReorder(sctp_assoc_t* a, uint8_t* out) {
+    size_t dcepOut = 0;
+    for (;;) {
+        int idx = reorderFind(a, a->peerTsn + 1);
+        if (idx < 0) break;
+        sctp_reorder_t& e = a->reorder[idx];
+        size_t d = deliverChunk(a, e.streamId, e.ppid, e.flags, e.data, e.dataLen, out);
+        if (d > 0) dcepOut = d;
+        a->peerTsn++;
+        reorderFreeSlot(a, idx);
+    }
+    return dcepOut;
+}
+
+/* Process one inbound DATA chunk. Delivers strictly in TSN order: an
+   in-order chunk is delivered immediately and the cumulative point advances
+   (draining any now-contiguous buffered chunks); a chunk past a gap is held
+   in the reorder buffer. Always returns a response packet in `out` — a DCEP
+   ACK if a DCEP OPEN was delivered, otherwise a SACK reflecting the true
+   cumulative + gap state. */
 static size_t processDataChunk(sctp_assoc_t* a, const uint8_t* chunk, size_t chunkLen,
                                uint8_t* out, size_t outSize) {
     if (chunkLen < 16) return 0;
@@ -687,18 +810,32 @@ static size_t processDataChunk(sctp_assoc_t* a, const uint8_t* chunk, size_t chu
     if (realChunkLen > 16 && realChunkLen - 16 < dataLen)
         dataLen = realChunkLen - 16;
 
-    a->peerTsn = tsn;
-
-    size_t outLen = 0;
-
-    if (ppid == PPID_DCEP && dataLen > 0 && data[0] == DCEP_OPEN) {
-        outLen = handleDcepOpen(a, streamId, data, dataLen, out);
-    } else if (ppid != PPID_DCEP) {
-        /* User data — forward to onData with per-stream reassembly. */
-        processDataFragment(a, streamId, ppid, flags, data, dataLen);
+    int32_t rel = (int32_t)(tsn - a->peerTsn);
+    if (rel <= 0) {
+        /* Duplicate of an already-delivered TSN (a retransmit racing the
+           original, or our prior SACK was lost). Re-ack so the peer stops
+           resending it; don't deliver again. */
+        return buildSack(a, out);
     }
 
-    return outLen;
+    size_t dcepOut = 0;
+    if (tsn == a->peerTsn + 1) {
+        /* Next expected TSN — deliver, advance, then flush the buffer. */
+        dcepOut = deliverChunk(a, streamId, ppid, flags, data, dataLen, out);
+        a->peerTsn = tsn;
+        size_t d2 = drainReorder(a, out);
+        if (d2 > 0) dcepOut = d2;
+    } else {
+        /* Arrived past a gap — hold it until the missing TSNs fill in. If
+           the pool is full we simply don't ack it; the reliable peer will
+           retransmit once its window reopens. */
+        reorderInsert(a, tsn, streamId, ppid, flags, data, dataLen);
+    }
+
+    /* A DCEP ACK takes the response slot when present (its inbound TSN is
+       covered by the next SACK); otherwise report cumulative + gaps now. */
+    if (dcepOut > 0) return dcepOut;
+    return buildSack(a, out);
 }
 
 /* ---- Public API ---- */
@@ -709,6 +846,7 @@ void sctpInit(sctp_assoc_t* a, uint8_t* outBuf, size_t outBufSize, uint16_t sctp
     sctp_dcreset_cb_t saveReset = a->onDcreset;
     sctp_data_cb_t    saveData  = a->onData;
     sctpRexmitFree(a);
+    sctpReorderFree(a);
     /* Free any in-flight inbound reassembly buffers before zeroing. */
     for (int i = 0; i < a->numChannels; i++) {
         if (a->channels[i].rxBuf) {
@@ -878,6 +1016,7 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
                     a->established = false;
                     a->numChannels = 0;
                     sctpRexmitFree(a);
+                    sctpReorderFree(a);
                     peerAbort = 1;
                 }
                 break;
@@ -888,8 +1027,23 @@ int sctpInput(sctp_assoc_t* a, const uint8_t* pkt, size_t pktLen, size_t* outLen
                 break;
 
             case SCTP_FORWARD_TSN:
-                if (chunkLen >= 8)
-                    a->peerTsn = r32(chunk + 4);
+                /* Peer abandoned some partially-reliable TSNs and is telling
+                   us to advance our cumulative point past them. Move it
+                   forward (never back), drop any buffered chunks the skip now
+                   covers, deliver whatever became contiguous beyond it, then
+                   SACK the new cumulative point. */
+                if (a->established && chunkLen >= 8) {
+                    uint32_t newCum = r32(chunk + 4);
+                    if ((int32_t)(newCum - a->peerTsn) > 0) {
+                        a->peerTsn = newCum;
+                        for (int i = 0; i < SCTP_REORDER_SLOTS; i++)
+                            if (a->reorder[i].used &&
+                                (int32_t)(a->reorder[i].tsn - newCum) <= 0)
+                                reorderFreeSlot(a, i);
+                        drainReorder(a, a->outBuf);
+                    }
+                    *outLen = buildSack(a, a->outBuf);
+                }
                 break;
 
             default:

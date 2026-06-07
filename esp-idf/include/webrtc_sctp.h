@@ -122,6 +122,26 @@ typedef struct {
     size_t   dataLen;
 } rexmit_msg_t;
 
+/* ---- Inbound reorder buffer ----
+   SCTP DATA chunks ride UDP, so they can arrive out of order or be dropped.
+   A correct ordered-reliable receiver must deliver to the upper layer — and
+   advance the SACK cumulative-ack point — in strict TSN order, holding any
+   chunk that arrives past a gap until the missing TSNs fill in. Each slot
+   holds one DATA chunk's payload in PSRAM. The pool is bounded: when full we
+   drop (and leave un-acked) the chunk so the reliable peer retransmits it.
+   64 slots covers realistic reordering / loss-recovery windows for the
+   inbound (browser→device) control + data streams. */
+#define SCTP_REORDER_SLOTS 64
+typedef struct {
+    bool     used;
+    uint32_t tsn;
+    uint16_t streamId;
+    uint32_t ppid;
+    uint8_t  flags;        /* B/E/U fragment flags, needed for reassembly */
+    uint8_t* data;         /* PSRAM, dataLen bytes (nullptr if dataLen==0) */
+    size_t   dataLen;
+} sctp_reorder_t;
+
 /* Forward decl for callback signatures */
 struct sctp_assoc_s;
 typedef void (*sctp_dceopen_cb_t)(struct sctp_assoc_s* a, int chIdx);
@@ -139,7 +159,10 @@ typedef struct sctp_assoc_s {
     uint32_t myTag;         /* our verification tag */
     uint32_t peerTag;       /* peer's verification tag */
     uint32_t myTsn;         /* next TSN to send */
-    uint32_t peerTsn;       /* highest cumulative TSN received */
+    uint32_t peerTsn;       /* inbound cumulative TSN ack point: highest TSN
+                               below which everything has been delivered in
+                               order. Out-of-order chunks past it wait in
+                               reorder[] until the gap closes. */
     uint16_t myPort;        /* our SCTP port */
     uint16_t peerPort;      /* peer's SCTP port */
     uint32_t peerRwnd;      /* peer's advertised receiver window */
@@ -150,6 +173,12 @@ typedef struct sctp_assoc_s {
     /* Channels */
     dc_channel_t channels[DC_MAX_CHANNELS];
     int          numChannels;
+
+    /* Inbound reorder buffer: DATA chunks received past a gap in the
+       cumulative TSN, held until the gap fills so delivery + SACKing stay
+       in strict TSN order. */
+    sctp_reorder_t reorder[SCTP_REORDER_SLOTS];
+    int            reorderCount;
 
     /* Callbacks (optional — nullptr is fine) */
     sctp_dceopen_cb_t onDceopen;
