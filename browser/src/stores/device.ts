@@ -10,10 +10,16 @@
 import { defineStore } from 'pinia'
 import { reactive, ref } from 'vue'
 import { getSession } from '../lib/webrtc-session'
+import { logSystemNotice } from './log'
 
 export const useDeviceStore = defineStore('device', () => {
   const settings: Record<string, any> = reactive({})
   const connected = ref(false)
+  /** True once the link is considered down (no pong for >4s, or the channel
+   *  dropped after we'd been connected). Stays true through the reconnect until
+   *  a fresh full storage dump lands — i.e. "reconnected AND resynced". Drives
+   *  the full-screen ConnectionOverlay. */
+  const linkDown = ref(false)
 
   const session = getSession()
   let dc: RTCDataChannel | null = null
@@ -21,6 +27,12 @@ export const useDeviceStore = defineStore('device', () => {
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
   let knownAssetId: number | null = null
   let lastRx = 0
+  /** Wall-clock of the last pong (or channel open). The 1s ping loop declares
+   *  the link down when this is >4s stale. */
+  let lastPongAt = 0
+  /** Set once the storage channel has opened at least once, so the liveness
+   *  check and drop-detection only fire after a real connection existed. */
+  let everConnected = false
   let reloading = false
   let clientInfoPushed = false
   /** Keys set while DC was down; flushed on reconnect so record.* toggles reach the device. */
@@ -245,6 +257,25 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
+  /** Declare the link down (idempotent on the false→true edge): show the
+   *  overlay, log the notice to log + cli, and force the shared session to
+   *  rebuild even if ICE/DTLS still report 'connected' (an app-level ping
+   *  gap can outrun the transport noticing). */
+  function enterLinkDown() {
+    if (linkDown.value) return
+    linkDown.value = true
+    logSystemNotice('Disconnected, stand by for reconnect.')
+    session.refresh()
+  }
+
+  /** Clear the down state once we're reconnected AND resynced (a fresh full
+   *  dump just completed). Idempotent on the true→false edge. */
+  function clearLinkDown() {
+    if (!linkDown.value) return
+    linkDown.value = false
+    logSystemNotice('Reconnected.', 'I')
+  }
+
   /** Channel builder: called by the shared session each time it builds a
    *  fresh PC, BEFORE createOffer. This guarantees `storage:1` is in the
    *  SDP so the offer has an m=application line. */
@@ -260,7 +291,9 @@ export const useDeviceStore = defineStore('device', () => {
 
     dc.onopen = () => {
       connected.value = true
+      everConnected = true
       lastRx = Date.now()
+      lastPongAt = Date.now()      /* fresh baseline so the 4s check doesn't trip */
       clientInfoPushed = false
       startHeartbeat()
       flushPendingSets()
@@ -273,7 +306,7 @@ export const useDeviceStore = defineStore('device', () => {
       lastRx = Date.now()
       try {
         const json = JSON.parse(text)
-        if (json.pong) return
+        if (json.pong) { lastPongAt = Date.now(); return }
         /* The full dump now STREAMS as several chunks bracketed by
            {__dump:'b'}/{__dump:'e'}; each chunk is a plain subtree we merge as
            it lands. On 'e' the dump is complete — re-flush any pending sets so
@@ -281,7 +314,7 @@ export const useDeviceStore = defineStore('device', () => {
            replacing the old fixed 300ms timeout race. */
         if (json.__dump !== undefined) {
           if (json.__dump === 'b') clientInfoPushed = false
-          else if (json.__dump === 'e') { flushPendingSets(); pushClientInfo() }
+          else if (json.__dump === 'e') { flushPendingSets(); pushClientInfo(); clearLinkDown() }
           return
         }
         deepMerge(settings, json)
@@ -294,8 +327,11 @@ export const useDeviceStore = defineStore('device', () => {
       dc = null
       connected.value = false
       stopHeartbeat()
-      /* Session handles reconnect + BUSY/KICK state. buildChannel will
-         fire again on the next fresh PC. */
+      /* A drop after we'd been connected is a disconnect — raise the overlay
+         and kick a reconnect (unless we're intentionally reloading the SPA).
+         buildChannel fires again on the next fresh PC; the overlay clears when
+         that channel's full dump completes. */
+      if (everConnected && !reloading) enterLinkDown()
     }
 
     dc.onerror = () => { /* onclose fires next */ }
@@ -303,14 +339,16 @@ export const useDeviceStore = defineStore('device', () => {
 
   function startHeartbeat() {
     stopHeartbeat()
+    /* Active 1s ping. The device echoes {"pong":1}; lastPongAt tracks the last
+       reply. 4s without a pong → the link is down: overlay + log/cli notice +
+       forced reconnect (see enterLinkDown). Only meaningful once a real link
+       existed, so a slow first connect doesn't flash the overlay. */
     heartbeatTimer = setInterval(() => {
-      if (!dc || dc.readyState !== 'open') return
-      try { dc.send('{"ping":1}') } catch { /* ignore */ }
-      if (Date.now() - lastRx > 30000) {
-        console.log('[storage] heartbeat timeout, nudging session reconnect')
-        session.connect()
+      if (dc && dc.readyState === 'open') {
+        try { dc.send('{"ping":1}') } catch { /* ignore */ }
       }
-    }, 10000)
+      if (everConnected && Date.now() - lastPongAt > 4000) enterLinkDown()
+    }, 1000)
   }
 
   function stopHeartbeat() {
@@ -379,5 +417,5 @@ export const useDeviceStore = defineStore('device', () => {
     dc = null
   })
 
-  return { settings, connected, get, set, sendJson, save, connect }
+  return { settings, connected, linkDown, get, set, sendJson, save, connect }
 })

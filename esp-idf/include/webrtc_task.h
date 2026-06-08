@@ -4,8 +4,8 @@
  * ICE-lite + DTLS 1.2 + minimal SCTP + DCEP.
  * Sends JPEG video and audio as binary DataChannel messages.
  */
-#ifndef SECCAM_WEBRTC_TASK_H
-#define SECCAM_WEBRTC_TASK_H
+#ifndef SPANGAP_WEBRTC_TASK_H
+#define SPANGAP_WEBRTC_TASK_H
 
 #include <stdint.h>
 

@@ -228,10 +228,14 @@
     </template>
 
     <q-space />
-    <span v-if="!compact" class="text-caption text-grey-6 q-mr-sm">{{ device.connected ? '' : 'Disconnected' }}</span>
     <span v-if="motionDetected" class="status-pill status-motion">MOTION</span>
     <span v-if="audioDetected" class="status-pill status-sound">SOUND</span>
     <span v-if="recordingActive" class="rec-blink">REC</span>
+
+    <!-- Full-screen disconnected overlay (teleports to body). Replaces the old
+         menu-bar 'Disconnected' caption. Mounted here because MenuBar is in
+         every spangap-web app, so they all get the overlay. -->
+    <ConnectionOverlay />
   </q-toolbar>
 </template>
 
@@ -243,6 +247,7 @@ import { useRouter } from 'vue-router'
 import { useDeviceStore } from '../stores/device'
 import { useMenuStore, type MenuGroup, type MenuItem } from '../stores/menu'
 import { authLogout } from '../lib/auth'
+import ConnectionOverlay from './ConnectionOverlay.vue'
 
 const $q = useQuasar()
 const router = useRouter()

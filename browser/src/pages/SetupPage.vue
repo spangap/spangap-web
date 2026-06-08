@@ -2,7 +2,7 @@
   <div v-if="ready" class="auth-page flex flex-center">
     <q-card class="auth-card q-pa-lg" flat bordered>
       <q-card-section class="text-center q-pb-none">
-        <div class="text-h5 text-weight-medium">Seccam Setup</div>
+        <div class="text-h5 text-weight-medium">{{ appName }} Setup</div>
         <div class="text-caption text-grey-6 q-mt-xs">Set an admin password to get started</div>
       </q-card-section>
 
@@ -57,6 +57,9 @@ import { useRouter } from 'vue-router'
 import { authPasswd, authLogin, setSessionCookie, isAdminUnset, AUTH_OK, AUTH_SAME_AS_OTHER_REALM } from '../lib/auth'
 
 const router = useRouter()
+/* Project name for the heading — see LoginPage.vue: pre-auth, so sourced
+   from the per-project <title> in the consumer's index.html. */
+const appName = (document.title || 'Device').replace(/^\w/, c => c.toUpperCase())
 const password = ref('')
 const confirm = ref('')
 const errorMsg = ref('')

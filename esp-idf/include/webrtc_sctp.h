@@ -19,8 +19,8 @@
  *
  * Runs over DTLS — caller handles encrypt/decrypt.
  */
-#ifndef SECCAM_WEBRTC_SCTP_H
-#define SECCAM_WEBRTC_SCTP_H
+#ifndef SPANGAP_WEBRTC_SCTP_H
+#define SPANGAP_WEBRTC_SCTP_H
 
 #include <stdint.h>
 #include <stddef.h>

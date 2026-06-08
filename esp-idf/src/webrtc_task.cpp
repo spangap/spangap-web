@@ -159,7 +159,15 @@ static uint32_t lastUdpRxMs = 0;
 static uint32_t lastUdpTxMs = 0;
 static uint32_t udpTxDrops = 0;
 static uint32_t udpTxDropLogMs = 0;
-static constexpr uint32_t UDP_TIMEOUT_MS = 45000;
+/* The browser pings every second over the storage DataChannel (and ICE consent
+ * + SCTP heartbeats add more UDP), so a live peer keeps this fresh continuously.
+ * A clean browser reconnect releases the session via the signaling-WS close;
+ * this short inactivity teardown is the backstop for an *unclean* vanish (sleep,
+ * crash, hard network drop), reclaiming the single-session slot in seconds
+ * instead of the old 45s. It's comfortably above the 1s ping cadence and the
+ * browser's own 4s "disconnected" threshold, so a peer that briefly stalls and
+ * resumes pinging keeps its transport. */
+static constexpr uint32_t UDP_TIMEOUT_MS = 8000;
 
 /* Signaling WS */
 static int  itsHandle = -1;

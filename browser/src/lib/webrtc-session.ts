@@ -78,6 +78,21 @@ class WebrtcSession {
     this.openSignaling()
   }
 
+  /** Force a full reconnect even when the PC still reports 'connected'. Used
+   *  by an app-level liveness check (the storage-channel ping) that has decided
+   *  the link is dead before ICE/DTLS/SCTP notices — tears the session down and
+   *  reconnects with fast backoff. No-op if we don't want to be connected, or
+   *  if we're parked in a terminal state (busy/kicked/auth) the user must clear.
+   */
+  refresh() {
+    if (!this.wantConnected) return
+    if (this._state === 'busy' || this._state === 'kicked' || this._state === 'auth') return
+    this.teardown()
+    this.reconnect.reset()        /* fast first retry */
+    this.setState('connecting')
+    this.scheduleReconnect()
+  }
+
   /** Close everything, go to 'idle'. No auto-reconnect until connect()
    *  is called again. */
   close() {

@@ -1,5 +1,5 @@
-#ifndef SECCAM_WEB_H
-#define SECCAM_WEB_H
+#ifndef SPANGAP_WEB_H
+#define SPANGAP_WEB_H
 
 #include <stddef.h>
 #include <stdbool.h>

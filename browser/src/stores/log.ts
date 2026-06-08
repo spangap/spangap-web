@@ -156,6 +156,17 @@ function formatLine(level: string, args: any[]): string {
   return `\x1b[${TS_COLOR}m${ts}\x1b[0m \x1b[${c}m${body}\x1b[0m`
 }
 
+/** Emit a one-off system notice (e.g. link down/up) through the same path as
+ *  the console hooks: it shows immediately in the local LogWindow (emitLocal)
+ *  AND is forwarded to the device log task (sendLogLine), which fans it out to
+ *  serial / the CLI console / the log file. Queued if the DC is down, so the
+ *  "Disconnected" line still reaches the device once the link is back. */
+export function logSystemNotice(text: string, level: 'I' | 'W' | 'E' = 'W') {
+  const line = formatLine(level, [text])
+  emitLocal(line + '\n')
+  try { sendLogLine(line) } catch { /* drop */ }
+}
+
 /** Wrap window.console.{log,info,warn,error,debug} so they also stream to
  *  device. The original console method runs first (so devtools still works),
  *  then the line is forwarded. Idempotent — guard lives on globalThis so
