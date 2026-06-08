@@ -264,8 +264,6 @@ export const useDeviceStore = defineStore('device', () => {
       clientInfoPushed = false
       startHeartbeat()
       flushPendingSets()
-      /* Full dump may arrive after open; re-flush so toggles like record.* win over stale merge. */
-      setTimeout(() => flushPendingSets(), 300)
     }
 
     dc.onmessage = (ev) => {
@@ -276,6 +274,16 @@ export const useDeviceStore = defineStore('device', () => {
       try {
         const json = JSON.parse(text)
         if (json.pong) return
+        /* The full dump now STREAMS as several chunks bracketed by
+           {__dump:'b'}/{__dump:'e'}; each chunk is a plain subtree we merge as
+           it lands. On 'e' the dump is complete — re-flush any pending sets so
+           local toggles (e.g. record.*) win over the just-merged stale state,
+           replacing the old fixed 300ms timeout race. */
+        if (json.__dump !== undefined) {
+          if (json.__dump === 'b') clientInfoPushed = false
+          else if (json.__dump === 'e') { flushPendingSets(); pushClientInfo() }
+          return
+        }
         deepMerge(settings, json)
         checkBuildTime()
         pushClientInfo()
