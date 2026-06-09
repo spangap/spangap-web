@@ -61,6 +61,10 @@ const props = withDefaults(defineProps<{
   minSize?: MinSize
   /** Initial dock state when no localStorage entry exists yet. */
   defaultDock?: { side: DockSide; size: number } | null
+  /** Monotonic "raise me" nonce. Bumping it brings the window to the front
+   *  even when it's already visible (a fresh open is raised by the visibility
+   *  watch). Menu "show" actions increment this. */
+  focusToken?: number
 }>(), {
   canResizeV: true,
   canResizeH: true,
@@ -68,6 +72,7 @@ const props = withDefaults(defineProps<{
   defaultGeom: () => ({ x: 25, y: 25, w: 50, h: 50 }),
   minSize: () => ({ w: 10, h: 8 }),
   defaultDock: null,
+  focusToken: 0,
 })
 
 const emit = defineEmits<{
@@ -409,6 +414,10 @@ onUnmounted(() => {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
   if (flashTimer) { clearTimeout(flashTimer); flashTimer = null }
 })
+
+/* A menu "show" action bumps focusToken to raise an already-open window.
+ * (Opening a hidden window is raised by the visibility watch below.) */
+watch(() => props.focusToken, () => { bringToFront() })
 
 watch(() => props.visible, (vis) => {
   if (vis) {

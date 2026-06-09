@@ -7,6 +7,16 @@ import { useMenuStore } from '../stores/menu'
 export const cliVisible = ref(false)
 export const logVisible = ref(false)
 
+/* ── Focus nonces ──
+ * Bumped by the show* helpers to raise an already-open window to the front.
+ * MainLayout binds these to each window's `focus-token` prop. */
+export const cliFocus = ref(0)
+export const logFocus = ref(0)
+
+/* Menu "Window → …" actions: only ever show + raise, never hide. */
+export function showCli() { cliVisible.value = true; cliFocus.value++ }
+export function showLog() { logVisible.value = true; logFocus.value++ }
+
 /* ── Log backlog ──
  * Number of bytes the /log WS should replay on connect. Stored in localStorage. */
 const BACKLOG_KEY = 'spangap.log.backlog'
@@ -130,20 +140,28 @@ const EDIT_FILES: Array<[string, string]> = [
 
 export function registerAdvanced() {
   const menu = useMenuStore()
-  menu.register('advanced/cli', 'Show CLI', { type: 'action', action: () => { cliVisible.value = !cliVisible.value } })
-  menu.register('advanced/log', 'Show Log', { type: 'action', action: () => { logVisible.value = !logVisible.value } })
+  /* "Window" menu — foregrounds the CLI / System Log floating windows. */
+  menu.setMenu('window', { label: 'Window', placement: 4 })
+  menu.register('window/cli', 'CLI', { type: 'action', action: showCli })
+  menu.register('window/log', 'System Log', { type: 'action', action: showLog })
 
-  menu.setMenu('advanced/backlog', { label: 'Backlog Size' })
-  for (const [label, bytes] of BACKLOG_PRESETS) {
-    menu.register(`advanced/backlog/${bytes}`, label,
-      { type: 'action', action: () => { logBacklogBytes.value = bytes; persistBacklog() } })
+  /* #if 0 — Backlog Size / Edit / Developer Options removed from the menu.
+   * The backing code (presets, editor, DeveloperPanel) is kept but no longer
+   * registered. Re-enable by changing the guard back to a registration. */
+  if (false) {
+    menu.setMenu('advanced/backlog', { label: 'Backlog Size' })
+    for (const [label, bytes] of BACKLOG_PRESETS) {
+      menu.register(`advanced/backlog/${bytes}`, label,
+        { type: 'action', action: () => { logBacklogBytes.value = bytes; persistBacklog() } })
+    }
+
+    for (const [name, path] of EDIT_FILES) {
+      menu.register(`advanced/edit/${name}`, name,
+        { type: 'action', action: () => { openEditor(path, name) } },
+        { disabled: () => isPathOpen(path) })
+    }
+
+    menu.register('advanced/dev', 'Developer Options', { type: 'panel', component: DeveloperPanel })
   }
-
-  for (const [name, path] of EDIT_FILES) {
-    menu.register(`advanced/edit/${name}`, name,
-      { type: 'action', action: () => { openEditor(path, name) } },
-      { disabled: () => isPathOpen(path) })
-  }
-
-  menu.register('advanced/dev', 'Developer Options', { type: 'panel', component: DeveloperPanel })
+  /* #endif */
 }

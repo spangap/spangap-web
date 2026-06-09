@@ -21,10 +21,10 @@
           </q-expansion-item>
           <q-separator />
           <template v-for="menu in visibleMenus">
-            <!-- Single-panel menu group: direct item -->
-            <q-item v-if="menu.items.length === 1 && menu.items[0].type === 'panel'"
+            <!-- Single-leaf menu group (panel or action): direct item -->
+            <q-item v-if="menu.items.length === 1 && (menu.items[0].type === 'panel' || menu.items[0].type === 'action')"
               :key="menu.id"
-              clickable v-close-popup @click="onSinglePanelClick(menu)">
+              clickable v-close-popup @click="onSingleItemClick(menu)">
               <q-item-section>{{ menu.label }}</q-item-section>
             </q-item>
             <!-- Multi-item menu group: expansion item -->
@@ -106,13 +106,13 @@
         </q-menu>
       </q-btn>
       <template v-for="menu in visibleMenus">
-        <!-- Single-panel menu group: direct button, no dropdown -->
-        <q-btn v-if="menu.items.length === 1 && menu.items[0].type === 'panel'"
+        <!-- Single-leaf menu group (panel or action): direct button, no dropdown -->
+        <q-btn v-if="menu.items.length === 1 && (menu.items[0].type === 'panel' || menu.items[0].type === 'action')"
           :key="menu.id"
           flat dense no-caps
           :label="menu.label"
           :style="{ fontWeight: 500, fontSize: '20px', padding: '2px 21px', letterSpacing: 0 }"
-          @click="onSinglePanelClick(menu)" />
+          @click="onSingleItemClick(menu)" />
         <!-- Multi-item menu group: dropdown -->
         <q-btn v-else :key="menu.id" flat dense no-caps :label="menu.label"
           :style="{ fontWeight: 500, fontSize: '20px', padding: '2px 21px', letterSpacing: 0 }">
@@ -306,8 +306,10 @@ function onSubmenuChildClick(child: MenuItem) {
   else if (child.type === 'action') child.action?.()
 }
 
-function onSinglePanelClick(menu: MenuGroup) {
+function onSingleItemClick(menu: MenuGroup) {
   const item = menu.items[0]
+  if (item.type === 'action') { item.action?.(); return }
+  // panel: toggle the drawer for this pane
   if (menuStore.activePanel === item.id) menuStore.closePanel()
   else menuStore.openPanel(item.id)
 }
@@ -319,8 +321,8 @@ async function onLogout() {
 
 /* Single close timer — any mouse activity in any menu/submenu cancels it.
  * `openSubmenuStack` is parent-first so we can close descendants without
- * disturbing ancestors. Submenu ids must use dot-hierarchy (parent.child)
- * so we can recognize ancestor relationships for nested menus. */
+ * disturbing ancestors. Submenu ids are slash-paths (parent/child) so we
+ * can recognize ancestor relationships for nested menus. */
 const menuRefs = new Map<string, any>()
 const submenuRefs = new Map<string, any>()
 let closeTimer: ReturnType<typeof setTimeout> | null = null
@@ -341,7 +343,7 @@ function setSubmenuRef(_menuId: string, itemId: string, el: any) {
 function closeSubmenusNotAncestorOf(itemId: string | null) {
   for (let i = openSubmenuStack.length - 1; i >= 0; i--) {
     const openId = openSubmenuStack[i]
-    if (itemId !== null && (itemId === openId || itemId.startsWith(openId + '.'))) break
+    if (itemId !== null && (itemId === openId || itemId.startsWith(openId + '/'))) break
     const ref = submenuRefs.get(openId)
     if (ref?.hide) ref.hide()
     openSubmenuStack.splice(i, 1)
