@@ -1771,6 +1771,14 @@ void webInit() {
         storageSet("s.web.version", WEB_VERSION);
     }
 
+    /* Advertise our services over mDNS (net owns the mechanism; we own these
+     * entries). The value is the port's config key, not a literal, so the
+     * advertisement follows s.net.{http,https}_port. storageDefault is
+     * idempotent, so a user who drops an entry to stop advertising isn't
+     * overridden on the next boot. */
+    storageDefault("s.net.mdns.http",  "s.net.http_port");
+    storageDefault("s.net.mdns.https", "s.net.https_port");
+
     /* Base URL→filesystem mappings. webMapAddIfAbsent only adds if the URL
      * isn't already present — user customisations to s.web.map survive. */
     webMapAddIfAbsent("/",      "/fixed/webroot", 0, 0, nullptr);

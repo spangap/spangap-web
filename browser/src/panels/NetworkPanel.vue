@@ -117,7 +117,7 @@
 
     <PanelHeading>mDNS</PanelHeading>
     <div class="q-gutter-y-sm">
-      <SettingToggle label="Enable" k="s.net.mdns" />
+      <SettingToggle label="Enable" k="s.net.mdns_enable" />
     </div>
 
     <!-- Scan dialog -->

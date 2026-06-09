@@ -12,7 +12,7 @@
         <q-list dense style="min-width: 220px">
           <!-- App group: About + Log out under progName -->
           <q-expansion-item :label="progName" dense dense-toggle>
-            <q-item class="hb-sub" clickable v-close-popup @click="menuStore.openPanel('about')">
+            <q-item class="hb-sub" clickable v-close-popup @click="menuStore.openPanel('app/about')">
               <q-item-section>About</q-item-section>
             </q-item>
             <q-item v-if="authActive" class="hb-sub" clickable v-close-popup @click="onLogout">
@@ -95,7 +95,7 @@
         :style="{ fontWeight: 900, fontSize: '20px', padding: '2px 21px', marginRight: '0px', letterSpacing: 0, fontFamily: 'system-ui' }">
         <q-menu class="menu-dropdown">
           <q-list dense>
-            <q-item clickable v-close-popup @click="menuStore.openPanel('about')">
+            <q-item clickable v-close-popup @click="menuStore.openPanel('app/about')">
               <q-item-section>About</q-item-section>
             </q-item>
             <q-separator v-if="authActive" />
@@ -110,7 +110,7 @@
         <q-btn v-if="menu.items.length === 1 && menu.items[0].type === 'panel'"
           :key="menu.id"
           flat dense no-caps
-          :label="menuStore.activePanel === menu.items[0].id && menu.activeLabel ? menu.activeLabel : menu.label"
+          :label="menu.label"
           :style="{ fontWeight: 500, fontSize: '20px', padding: '2px 21px', letterSpacing: 0 }"
           @click="onSinglePanelClick(menu)" />
         <!-- Multi-item menu group: dropdown -->
@@ -264,8 +264,19 @@ const audioDetected   = computed(() => settings.value.detect?.audio == 1)
 /* Collapse menu bar to hamburger below the md breakpoint (< 1024px). */
 const compact = computed(() => $q.screen.lt.md)
 
+/* A group renders only when it isn't hidden and has at least one non-hidden
+ * leaf — so the About-only 'app' group (all leaves hidden) and the Recording
+ * group (group hidden while no SD card) both stay openable but unshown.
+ * `hidden` may be a constant or a predicate evaluated each render. */
+function isHidden(h?: boolean | (() => boolean)): boolean {
+  return typeof h === 'function' ? h() : !!h
+}
+function leafVisible(it: MenuItem): boolean {
+  if (isHidden(it.hidden)) return false
+  return it.children ? it.children.some(leafVisible) : true
+}
 const visibleMenus = computed<MenuGroup[]>(() =>
-  (menuStore.sortedMenus as MenuGroup[]).filter(m => !m.hidden || !m.hidden()),
+  (menuStore.sortedMenus as MenuGroup[]).filter(m => !isHidden(m.hidden) && m.items.some(leafVisible)),
 )
 
 const progName = computed(() => {
@@ -297,12 +308,8 @@ function onSubmenuChildClick(child: MenuItem) {
 
 function onSinglePanelClick(menu: MenuGroup) {
   const item = menu.items[0]
-  if (menuStore.activePanel === item.id) {
-    menu.onClose?.()
-    menuStore.closePanel()
-  } else {
-    menuStore.openPanel(item.id)
-  }
+  if (menuStore.activePanel === item.id) menuStore.closePanel()
+  else menuStore.openPanel(item.id)
 }
 
 async function onLogout() {

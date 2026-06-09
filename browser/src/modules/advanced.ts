@@ -129,28 +129,21 @@ const EDIT_FILES: Array<[string, string]> = [
 ]
 
 export function registerAdvanced() {
-  useMenuStore().register('advanced', 'Advanced', [
-    { id: 'adv.cli', label: 'Show CLI', type: 'action',
-      action: () => { cliVisible.value = !cliVisible.value } },
-    { id: 'adv.log', label: 'Show Log', type: 'action',
-      action: () => { logVisible.value = !logVisible.value } },
-    { id: 'adv.backlog', label: 'Backlog Size', type: 'submenu',
-      children: BACKLOG_PRESETS.map(([label, bytes], i) => ({
-        id: `adv.backlog.${bytes}`,
-        label,
-        type: 'action' as const,
-        action: () => { logBacklogBytes.value = bytes; persistBacklog() },
-      })),
-    },
-    { id: 'adv.edit', label: 'Edit', type: 'submenu',
-      children: EDIT_FILES.map(([name, path], i) => ({
-        id: `adv.edit.${name}`,
-        label: name,
-        type: 'action' as const,
-        action: () => { openEditor(path, name) },
-        disabled: () => isPathOpen(path),
-      })),
-    },
-    { id: 'adv.dev', label: 'Developer Options', type: 'panel', component: DeveloperPanel },
-  ])
+  const menu = useMenuStore()
+  menu.register('advanced/cli', 'Show CLI', { type: 'action', action: () => { cliVisible.value = !cliVisible.value } })
+  menu.register('advanced/log', 'Show Log', { type: 'action', action: () => { logVisible.value = !logVisible.value } })
+
+  menu.setMenu('advanced/backlog', { label: 'Backlog Size' })
+  for (const [label, bytes] of BACKLOG_PRESETS) {
+    menu.register(`advanced/backlog/${bytes}`, label,
+      { type: 'action', action: () => { logBacklogBytes.value = bytes; persistBacklog() } })
+  }
+
+  for (const [name, path] of EDIT_FILES) {
+    menu.register(`advanced/edit/${name}`, name,
+      { type: 'action', action: () => { openEditor(path, name) } },
+      { disabled: () => isPathOpen(path) })
+  }
+
+  menu.register('advanced/dev', 'Developer Options', { type: 'panel', component: DeveloperPanel })
 }

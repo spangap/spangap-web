@@ -4,21 +4,12 @@ import AboutPanel from '../panels/AboutPanel.vue'
 
 export function registerSystem() {
   const menu = useMenuStore()
-  /* System is a submenu so other straddles can register children under it
-   * (see [[ota]] → 'system.update'). The menu store merges submenu
-   * children by id (stores/menu.ts mergeItems). */
-  menu.register('settings', 'Settings', [
-    { id: 'system', label: 'System', type: 'submenu',
-      children: [
-        { id: 'system.general', label: 'General', type: 'panel',
-          component: SystemPanel },
-      ],
-    },
-  ])
-  /* About panel registered under a hidden 'app' group so the MenuBar's
-   * top-level app dropdown can openPanel('about') without a separate
-   * top-level Settings entry. */
-  menu.register('app', 'App', [
-    { id: 'about', label: 'About', type: 'panel', component: AboutPanel },
-  ], { hidden: () => true })
+  /* System is a submenu so other straddles can register children under it —
+   * e.g. [[ota]] adds 'settings/system/update'; the store merges containers
+   * by path. */
+  menu.register('settings/system/general', 'General', { type: 'panel', component: SystemPanel })
+  /* About lives in a hidden 'app' group: the MenuBar's app dropdown opens it
+   * by id (openPanel('app/about')), but the group never shows a menu-bar
+   * button because its only leaf is hidden. */
+  menu.register('app/about', 'About', { type: 'panel', component: AboutPanel }, { hidden: true })
 }
