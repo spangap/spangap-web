@@ -1,6 +1,6 @@
 <template>
   <div class="q-gutter-y-md">
-    <PanelHeading>This Camera</PanelHeading>
+    <PanelHeading>This System</PanelHeading>
     <div class="q-gutter-y-sm">
       <SettingText label="Hostname" k="s.net.hostname" />
     </div>
