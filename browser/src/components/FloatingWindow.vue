@@ -1,13 +1,15 @@
 <template>
   <div
-    v-show="visible"
+    v-show="shown"
     ref="windowRef"
     class="fw"
+    :class="{ 'fw--compact': compact }"
     :style="windowStyle"
     @mousedown="bringToFront"
   >
-    <!-- Resize handles -->
-    <template v-if="canResizeV || canResizeH">
+    <!-- Resize handles — suppressed in compact mode: the window is full-screen
+         there and neither draggable nor resizable. -->
+    <template v-if="(canResizeV || canResizeH) && !compact">
       <div v-if="canResizeV" class="fw-resize fw-resize-n" @pointerdown.prevent="startResize('n', $event)" />
       <div v-if="canResizeV" class="fw-resize fw-resize-s" @pointerdown.prevent="startResize('s', $event)" />
       <div v-if="canResizeH" class="fw-resize fw-resize-e" @pointerdown.prevent="startResize('e', $event)" />
@@ -46,6 +48,11 @@ let zCounter = 1000
 <script setup lang="ts">
 import { ref, reactive, watch, onMounted, onUnmounted, nextTick, computed } from 'vue'
 import { docks, layout, dockWindow, undockWindow, type DockSide } from '../modules/advanced'
+import { useCompact } from '../lib/viewport'
+import {
+  registerWindow, unregisterWindow, setWindowTitle, setWindowVisible,
+  setWindowZ, focusedWindowId, windowFocusReq,
+} from '../lib/windows'
 
 interface Geom { x: number; y: number; w: number; h: number }
 interface MinSize { w: number; h: number }
@@ -85,9 +92,19 @@ defineExpose({ bringToFront, flashTitleBar })
 const windowRef = ref<HTMLElement>()
 const bodyRef = ref<HTMLElement>()
 
+/* ── compact (phone) mode ──
+ * One shared signal flips the whole shell to single-window. In compact mode
+ * this window paints full-screen and is shown only while it's the focused
+ * (front-most visible) window; the window manager arbitrates that across all
+ * instances. Switching windows = bringing another to front (menu/switcher). */
+const compact = useCompact()
+const shown = computed(() =>
+  props.visible && (!compact.value || focusedWindowId.value === props.id),
+)
+
 /* ── z-order ── */
 const zIndex = ref(zCounter)
-function bringToFront() { zIndex.value = ++zCounter }
+function bringToFront() { zIndex.value = ++zCounter; setWindowZ(props.id, zIndex.value) }
 
 /* ── geometry ── */
 const DOCK_THRESH = 1.5
@@ -103,6 +120,11 @@ let preDockH = pctH.value
 const isDocked = computed(() => props.canDock && docks[props.id]?.side != null)
 
 const windowStyle = computed(() => {
+  /* Compact: full-bleed, geometry/dock ignored. Keep the live z so the focused
+   * window still paints above any sibling that's mid-transition. */
+  if (compact.value) {
+    return { left: '0%', top: '0%', width: '100%', height: '100%', zIndex: zIndex.value }
+  }
   const rect = isDocked.value ? layout.value.rects[props.id] : null
   if (rect) {
     return {
@@ -200,9 +222,11 @@ function clamp() {
   pctY.value = Math.min(a.bottom - pctH.value, Math.max(a.top, pctY.value))
 }
 
-/* Re-clamp when the floating area changes (another window docked/resized) */
+/* Re-clamp when the floating area changes (another window docked/resized).
+ * Skipped in compact mode — geometry is unused there and clamping against the
+ * full-screen area would needlessly rewrite the persisted desktop geometry. */
 watch(() => layout.value.floatingArea, () => {
-  if (!isDocked.value && props.visible) clamp()
+  if (!compact.value && !isDocked.value && props.visible) clamp()
 }, { deep: true })
 
 /* ── container dimensions ── */
@@ -263,6 +287,8 @@ let dragPointerId = -1
 
 function startDrag(e: PointerEvent) {
   bringToFront()
+  /* Full-screen in compact mode: the titlebar is a header, not a drag handle. */
+  if (compact.value) return
   /* Only react to primary pointer (left-click for mouse, single-finger
    * for touch). Multi-touch / right-click drag would mis-track. */
   if (!e.isPrimary) return
@@ -389,6 +415,8 @@ function flashTitleBar() {
 
 /* ── lifecycle ── */
 onMounted(() => {
+  registerWindow(props.id, props.title, zIndex.value)
+  setWindowVisible(props.id, props.visible)
   loadState()
   if (!isDocked.value) clamp()
 
@@ -413,13 +441,20 @@ onUnmounted(() => {
   resizeObserver = null
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
   if (flashTimer) { clearTimeout(flashTimer); flashTimer = null }
+  unregisterWindow(props.id)
 })
 
+/* Keep the window manager's mirror of this window in sync. */
+watch(() => props.title, (t) => setWindowTitle(props.id, t))
+
 /* A menu "show" action bumps focusToken to raise an already-open window.
- * (Opening a hidden window is raised by the visibility watch below.) */
+ * (Opening a hidden window is raised by the visibility watch below.) The
+ * mobile switcher uses focusWindow() instead, which bumps this nonce. */
 watch(() => props.focusToken, () => { bringToFront() })
+watch(() => windowFocusReq(props.id), () => { if (props.visible) bringToFront() })
 
 watch(() => props.visible, (vis) => {
+  setWindowVisible(props.id, vis)
   if (vis) {
     bringToFront()
     if (!isDocked.value) clamp()
@@ -450,6 +485,31 @@ watch(() => props.visible, (vis) => {
    * so the outside-of-border hit zone is clickable. Inner clipping is
    * handled per-child via their own border-radius / overflow rules. */
 }
+
+/* Compact (phone): the window fills the whole usable area. No chrome that
+ * implies it floats — square corners, no outline ring — and a taller,
+ * touch-friendly header. Geometry comes from the inline full-screen style. */
+.fw--compact {
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
+}
+.fw--compact .fw-titlebar {
+  height: 44px;
+  min-height: 44px;
+  cursor: default;
+  border-radius: 0;
+  /* Drag is disabled in compact, so let normal touch behaviour through. */
+  touch-action: auto;
+}
+.fw--compact .fw-titlebar:active { cursor: default; }
+/* Bigger close hit-target for touch (the dot stays the visual size). */
+.fw--compact .fw-close {
+  width: 16px; height: 16px;
+  margin: -10px; padding: 10px;
+  background-clip: content-box;
+}
+.fw--compact .fw-title { font-size: 15px; }
 
 .fw-titlebar {
   display: flex;

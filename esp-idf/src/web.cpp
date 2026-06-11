@@ -652,7 +652,15 @@ static bool wsComputeAccept(const char* key, char* accept, size_t acceptLen) {
 }
 
 static bool isWsUpgrade(const char* buf, int len) {
-    return strstr(buf, "Upgrade: websocket") || strstr(buf, "Upgrade: Websocket");
+    /* RFC 6455: the header field name and the "websocket" token are both
+     * case-insensitive. Browsers hitting the device directly send
+     * "Upgrade: websocket", but a reverse proxy (e.g. `spangap dev`'s Vite
+     * proxy, which runs on Node) lowercases header names to "upgrade:", so a
+     * literal strstr would miss it. webHeaderField matches the field name
+     * case-insensitively; compare the value the same way. */
+    char val[32];
+    return webHeaderField(buf, len, "Upgrade", val, sizeof(val))
+        && strcasecmp(val, "websocket") == 0;
 }
 
 /* ---- Request path extraction ---- */

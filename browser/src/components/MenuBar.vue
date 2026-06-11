@@ -20,6 +20,20 @@
             </q-item>
           </q-expansion-item>
           <q-separator />
+          <!-- Open windows switcher (phone): exactly one window is on screen
+               at a time, so this is the quick way to bring another forward.
+               Front-most first; the current one is marked. -->
+          <template v-if="compact && openWindows.length">
+            <q-item-label header class="win-switch-hdr">Windows</q-item-label>
+            <q-item v-for="w in openWindows" :key="w.id"
+              class="hb-sub" clickable v-close-popup @click="switchTo(w.id)">
+              <q-item-section>{{ w.title }}</q-item-section>
+              <q-item-section side v-if="w.id === focusedWindowId">
+                <span class="win-switch-dot" />
+              </q-item-section>
+            </q-item>
+            <q-separator />
+          </template>
           <template v-for="menu in visibleMenus">
             <!-- Single-leaf menu group (panel or action): direct item -->
             <q-item v-if="menu.items.length === 1 && (menu.items[0].type === 'panel' || menu.items[0].type === 'action')"
@@ -247,6 +261,8 @@ import { useRouter } from 'vue-router'
 import { useDeviceStore } from '../stores/device'
 import { useMenuStore, type MenuGroup, type MenuItem } from '../stores/menu'
 import { authLogout } from '../lib/auth'
+import { useCompact } from '../lib/viewport'
+import { openWindows, focusedWindowId, focusWindow } from '../lib/windows'
 import ConnectionOverlay from './ConnectionOverlay.vue'
 
 const $q = useQuasar()
@@ -261,8 +277,16 @@ const recordingActive = computed(() => settings.value.record?.active == 1)
 const motionDetected  = computed(() => settings.value.detect?.motion == 1)
 const audioDetected   = computed(() => settings.value.detect?.audio == 1)
 
-/* Collapse menu bar to hamburger below the md breakpoint (< 1024px). */
-const compact = computed(() => $q.screen.lt.md)
+/* Collapse menu bar to hamburger on phone-class viewports (shared signal). */
+const compact = useCompact()
+
+/* Bring an open window to the front. On a phone that's literally "switch to
+ * it" — it becomes the single full-screen window — so close any open settings
+ * pane first, then raise it. */
+function switchTo(id: string) {
+  menuStore.closePanel()
+  focusWindow(id)
+}
 
 /* A group renders only when it isn't hidden and has at least one non-hidden
  * leaf — so the About-only 'app' group (all leaves hidden) and the Recording
@@ -408,6 +432,23 @@ function onSubmenuLeave(_menuId: string, _itemId: string) {
 .hamburger-btn {
   margin-right: 4px;
   padding: 6px 10px;
+}
+
+.win-switch-hdr {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.4);
+  padding-top: 6px;
+  min-height: 0;
+}
+.win-switch-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--q-primary, #4a9);
+  display: inline-block;
 }
 
 /* Indent for hamburger expansion contents */
