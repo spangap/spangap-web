@@ -645,7 +645,7 @@ static size_t buildDataFragment(sctp_assoc_t* a, uint32_t tsn, uint16_t streamId
  *  with B=1 on the first and E=1 on the last; ordered channels arrive in
  *  TSN order thanks to SCTP's cumulative TSN semantics. We accumulate
  *  into the channel's rxBuf and fire onData once E=1 lands. PSRAM,
- *  capped at 64KB per message (matches SDP max-message-size). */
+ *  capped at MAX_MESSAGE per message (matches SDP max-message-size). */
 static void processDataFragment(sctp_assoc_t* a, uint16_t streamId,
                                 uint32_t ppid, uint8_t flags,
                                 const uint8_t* data, size_t dataLen) {
@@ -674,8 +674,9 @@ static void processDataFragment(sctp_assoc_t* a, uint16_t streamId,
     }
     if (!c->rxBuf) return;  /* alloc failed or orphan continuation */
 
-    /* Grow buffer if this fragment would overflow. Cap at 64KB. */
-    constexpr size_t MAX_MESSAGE = 65536;
+    /* Grow buffer if this fragment would overflow. Cap matches the SDP
+     * a=max-message-size we advertise (webrtc_task.cpp): 256 KB. */
+    constexpr size_t MAX_MESSAGE = 262144;
     if (c->rxLen + dataLen > c->rxCap) {
         size_t newCap = c->rxCap;
         while (newCap < c->rxLen + dataLen) newCap *= 2;

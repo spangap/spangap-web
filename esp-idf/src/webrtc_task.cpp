@@ -270,7 +270,10 @@ static void schedulerPass() {
     auto channelHasWork = [](int i) {
         if (dcMap[i].handle < 0) return false;
         if (dcMap[i].pendingBuf) return true;
-        return itsBytesAvailable(dcMap[i].handle) > 4;
+        /* ITS_PACKET: itsBytesAvailable is the outstanding payload bytes on the
+         * recv side — any queued message is > 0 (the old > 4 was the legacy
+         * whole-packet-in-ring heuristic, which would now miss 1-4 byte msgs). */
+        return itsBytesAvailable(dcMap[i].handle) > 0;
     };
 
     /* Cap messages per pass so the main loop keeps cycling and inbound
@@ -654,7 +657,12 @@ static std::string generateSdpAnswer(const char* offerSdp) {
         "a=setup:passive\r\n"
         "a=mid:0\r\n"
         "a=sctp-port:%d\r\n"
-        "a=max-message-size:65536\r\n",
+        /* 256 KB: the browser may send us messages this large; our inbound
+         * reassembly cap (WEBRTC_MAX_MESSAGE in webrtc_sctp) matches, and the
+         * 1 MB rexmit pool already covers outbound. Lets a single config patch
+         * (e.g. a large Nomad page) ride one message instead of the old 64 KB
+         * ceiling. Chrome supports 256 KB SCTP messages. */
+        "a=max-message-size:262144\r\n",
         port, primaryIp, iceUfrag, icePwd, fingerprint, SCTP_PORT);
     sdp += line;
 
