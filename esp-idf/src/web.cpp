@@ -6,6 +6,7 @@
  * Runs on core 1.
  */
 #include "web.h"
+#include "mem.h"
 #include "auth.h"
 #include "storage.h"
 #include "log.h"
@@ -858,7 +859,7 @@ static void webFileWorkerFn(void*) {
 static bool spawnFileTask(int h, const char* fsPath, const char* fallbackPath,
                           bool tryGz, const char* name, bool headOnly,
                           const char* rangeHdr) {
-    auto* req = (web_file_req_t*)malloc(sizeof(web_file_req_t));
+    auto* req = (web_file_req_t*)gp_alloc(sizeof(web_file_req_t));
     if (!req) { warn("spawnFileTask: malloc failed for %s\n", fsPath); return false; }
     safeStrncpy(req->path, fsPath, sizeof(req->path));
     safeStrncpy(req->fallbackPath, fallbackPath ? fallbackPath : "", sizeof(req->fallbackPath));

@@ -12,6 +12,7 @@
  * See docs/webrtc-for-everything.md.
  */
 #include "webrtc_task.h"
+#include "mem.h"
 #include "webrtc_sctp.h"
 #include "storage.h"
 #include "compat.h"
@@ -430,7 +431,7 @@ static int tryReassembleClientHello(const uint8_t* pkt, size_t n) {
     if (fragOff == 0 || chReasmMsgSeq != msgSeq || !chReasmBuf) {
         chReasmFree();
         chReasmLen = 25 + hsLen;
-        chReasmBuf = (uint8_t*)malloc(chReasmLen);
+        chReasmBuf = (uint8_t*)gp_alloc(chReasmLen);
         if (!chReasmBuf) return 0;
         memcpy(chReasmBuf, pkt, 25);
         uint16_t recLen2 = (uint16_t)(12 + hsLen);
