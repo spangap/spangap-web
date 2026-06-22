@@ -60,6 +60,20 @@ safeStrncpy(wreg.path, "mypath", sizeof(wreg.path));
 itsSendAux("web", WEB_PATH_REG_PORT, &wreg, sizeof(wreg), pdMS_TO_TICKS(500));
 ```
 
+Register a content transform by file extension — the served file's bytes
+(decompressed if it was `.gz` on disk) are handed to your callback, which
+returns a response body. Used by the viewer to render `*.md` as HTML on-device;
+the web server stays format-agnostic:
+
+```cpp
+webRegisterFileExt("md,markdown", myMdToHtml);   // → text/html
+```
+
+The server also honours `Accept-Encoding`: a `.gz` file is sent verbatim
+(`Content-Encoding: gzip`) only to clients that advertise gzip; others get it
+inflated on the fly (ROM `tinfl`, zero added flash). Transformed bodies are
+always sent uncompressed.
+
 Add a browser DataChannel by opening an ITS server port and letting the
 WebRTC task auto-route `<task>:<n>` labels to it. See
 [spangap/INTERNALS.md](../spangap/INTERNALS.md) "Add a browser

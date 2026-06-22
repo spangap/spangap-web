@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <cctype>
 #include <string>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -25,6 +26,8 @@
 #include "mbedtls/sha1.h"
 #include "mbedtls/base64.h"
 #include "cJSON.h"
+#include "miniz.h"        /* ESP32-S3 ROM DEFLATE (tinfl_*) — zero added flash */
+#include "lwip/ip_addr.h" /* ip_addr_isloopback — loopback request exemptions */
 
 #define WEB_KEEPALIVE_MS   5000
 #define WEB_ITS_TO_SIZE    4096   /* client→web (HTTP requests from browser) */
@@ -54,6 +57,17 @@ static web_map_t webMaps[WEB_MAX_MAPS];
 static int webMapCount = 0;
 static web_mime_t webMimes[WEB_MAX_MIMES];
 static int webMimeCount = 0;
+
+/* File-extension transforms (e.g. .md → text/html). Registered once at init by
+ * the owning straddle (viewer registers markdown), read-only afterwards on the
+ * file worker — no locking. */
+#define WEB_MAX_EXT_HANDLERS 8
+struct web_ext_handler_t {
+    std::string          exts;   /* comma-separated, no dots, lower-case */
+    web_file_transform_t cb;
+};
+static web_ext_handler_t webExtHandlers[WEB_MAX_EXT_HANDLERS];
+static int webExtHandlerCount = 0;
 
 /* HTTPS redirect config */
 static bool httpsOnly = false;
@@ -125,6 +139,87 @@ static const char* mimeType(const char* path) {
         }
     }
     return "application/octet-stream";
+}
+
+/* ---- File-extension transforms ---- */
+
+/* True if `ext` (length extLen, no dot) appears in a comma-list "a,b,c". */
+static bool extInList(const char* ext, size_t extLen, const char* list) {
+    const char* p = list;
+    while (*p) {
+        const char* comma = strchr(p, ',');
+        size_t len = comma ? (size_t)(comma - p) : strlen(p);
+        if (extLen == len && strncasecmp(p, ext, len) == 0) return true;
+        if (!comma) break;
+        p = comma + 1;
+    }
+    return false;
+}
+
+/* Resolve a path's extension to a registered transform, or nullptr. */
+static web_file_transform_t findExtTransform(const char* path) {
+    const char* dot = strrchr(path, '.');
+    if (!dot) return nullptr;
+    const char* ext = dot + 1;
+    size_t extLen = strlen(ext);
+    for (int i = 0; i < webExtHandlerCount; i++)
+        if (extInList(ext, extLen, webExtHandlers[i].exts.c_str()))
+            return webExtHandlers[i].cb;
+    return nullptr;
+}
+
+void webRegisterFileExt(const char* exts, web_file_transform_t cb) {
+    if (!exts || !*exts || !cb) return;
+    if (webExtHandlerCount >= WEB_MAX_EXT_HANDLERS) {
+        warn("ext-handler table full, dropping '%s'\n", exts);
+        return;
+    }
+    /* Lower-case the list once so lookups are a plain length+strncasecmp. */
+    std::string lc(exts);
+    for (char& c : lc) c = (char)tolower((unsigned char)c);
+    webExtHandlers[webExtHandlerCount++] = { lc, cb };
+    info("ext-handler registered for '%s'\n", lc.c_str());
+}
+
+/* ---- gzip inflate (ROM tinfl) ----
+ * Inflate a .gz blob into a freshly heap_caps(SPIRAM) buffer. The ~11 KB tinfl
+ * decompressor state lives on the heap (not the stack) and we feed a single
+ * non-wrapping output buffer sized from the gzip ISIZE trailer — so this runs
+ * with a tiny stack and no 32 KB stack dictionary. Returns the buffer (caller
+ * heap_caps_free()s) and sets *outLen, or nullptr on malformed input / cap. */
+static uint8_t* gzInflate(const uint8_t* gz, size_t gzLen, size_t cap, size_t* outLen) {
+    if (gzLen < 18 || gz[0] != 0x1f || gz[1] != 0x8b || gz[2] != 8) return nullptr;
+    uint8_t flg = gz[3];
+    size_t pos = 10;                                   /* fixed gzip header */
+    if (flg & 0x04) {                                  /* FEXTRA */
+        if (pos + 2 > gzLen) return nullptr;
+        size_t xlen = gz[pos] | (gz[pos + 1] << 8);
+        pos += 2 + xlen;
+    }
+    if (flg & 0x08) while (pos < gzLen && gz[pos++]) {} /* FNAME (NUL-term) */
+    if (flg & 0x10) while (pos < gzLen && gz[pos++]) {} /* FCOMMENT */
+    if (flg & 0x02) pos += 2;                           /* FHCRC */
+    if (pos + 8 > gzLen) return nullptr;
+
+    /* ISIZE: original size mod 2^32, little-endian, in the last 4 bytes. */
+    size_t isize = (size_t)gz[gzLen - 4] | ((size_t)gz[gzLen - 3] << 8) |
+                   ((size_t)gz[gzLen - 2] << 16) | ((size_t)gz[gzLen - 1] << 24);
+    if (isize == 0 || isize > cap) return nullptr;
+
+    uint8_t* out = (uint8_t*)heap_caps_malloc(isize, MALLOC_CAP_SPIRAM);
+    if (!out) return nullptr;
+    auto* d = (tinfl_decompressor*)heap_caps_malloc(sizeof(tinfl_decompressor), MALLOC_CAP_SPIRAM);
+    if (!d) { heap_caps_free(out); return nullptr; }
+    tinfl_init(d);
+
+    size_t inN = gzLen - 8 - pos;                       /* raw DEFLATE length */
+    size_t outN = isize;
+    tinfl_status st = tinfl_decompress(d, gz + pos, &inN, out, out, &outN,
+                                       TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+    heap_caps_free(d);
+    if (st != TINFL_STATUS_DONE) { heap_caps_free(out); return nullptr; }
+    *outLen = outN;
+    return out;
 }
 
 /* ---- URL mapping: find best (most specific) match ---- */
@@ -407,6 +502,7 @@ struct web_handle_t {
 
     /* Auth */
     char authRealm[16] = {};  /* resolved realm for this request, or "" */
+    bool acceptGzip = false;  /* request advertised Accept-Encoding: gzip */
 
     /* Response header */
     char hdr[320];
@@ -709,6 +805,7 @@ struct web_file_req_t {
     bool   tryGz;
     bool   headOnly;
     bool   authEnabled;       /* whether to inject X-Authenticated at all */
+    bool   acceptGzip;        /* client sent Accept-Encoding: gzip */
     int    itsHandle;
     int    slot;
 };
@@ -746,6 +843,69 @@ static FILE* openWithGzFallback(const char* path, bool tryGz, bool* gz) {
 #define WEB_FILE_REQ_PORT  8081
 #define WEB_FILE_INBOX_DEPTH 8
 
+/* Whole-file response (no Range, no streaming): read the open file fully into
+ * PSRAM, inflate it if it's gzip-on-disk, optionally run an extension transform
+ * (e.g. .md → HTML), and send the result uncompressed. Used for two cases:
+ *   - a registered transform matches the extension, or
+ *   - the file is .gz on disk but the client didn't send Accept-Encoding: gzip.
+ * Closes fp. Returns true if a response (200, or a best-effort 500) was
+ * delivered; false only if the socket write itself failed (caller disconnects). */
+#define WEB_WHOLE_MAX_IN   (512 * 1024)        /* raw read cap (PSRAM)        */
+#define WEB_WHOLE_MAX_OUT  (4 * 1024 * 1024)   /* inflate ISIZE cap (PSRAM)   */
+
+static bool serveWholeFile(web_file_req_t* req, FILE* fp, size_t fileSize,
+                           bool gzipped, web_file_transform_t xform) {
+    uint8_t *raw = nullptr, *plain = nullptr, *body = nullptr;
+    size_t plainLen = 0, bodyLen = 0;
+    const char* ctype = nullptr;
+    bool freeBody = false, built = false;
+
+    if (fileSize > 0 && fileSize <= WEB_WHOLE_MAX_IN &&
+        (raw = (uint8_t*)heap_caps_malloc(fileSize, MALLOC_CAP_SPIRAM)) &&
+        fread(raw, 1, fileSize, fp) == fileSize) {
+        if (gzipped) {
+            plain = gzInflate(raw, fileSize, WEB_WHOLE_MAX_OUT, &plainLen);
+            heap_caps_free(raw); raw = nullptr;
+        } else {
+            plain = raw; plainLen = fileSize; raw = nullptr;
+        }
+        if (plain) {
+            if (xform && xform(req->name, plain, plainLen, &body, &bodyLen, &ctype) && body) {
+                freeBody = true;                 /* transform owns `body`        */
+                heap_caps_free(plain); plain = nullptr;
+            } else {                             /* serve file as-is (inflated)  */
+                body = plain; bodyLen = plainLen; plain = nullptr;
+                ctype = mimeType(req->name); freeBody = true;
+            }
+            built = true;
+        }
+    }
+    if (raw)   heap_caps_free(raw);
+    if (plain) heap_caps_free(plain);
+    fclose(fp);
+
+    bool ok;
+    if (!built) {
+        char hdr[128];
+        int n = snprintf(hdr, sizeof(hdr), "HTTP/1.1 500 Internal Server Error\r\n"
+            "Content-Length: 0\r\nConnection: keep-alive\r\n\r\n");
+        ok = sendAll(req->itsHandle, hdr, n);    /* delivered → keep connection */
+    } else {
+        char hdr[512];
+        int hl = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.1 200 OK\r\nContent-Type: %s\r\nContent-Length: %u\r\n"
+            "Connection: keep-alive\r\n", ctype, (unsigned)bodyLen);
+        if (req->authEnabled && hl < (int)sizeof(hdr) - 48)
+            hl += snprintf(hdr + hl, sizeof(hdr) - hl,
+                           "X-Authenticated: %s\r\n", req->authRealm);
+        if (hl < (int)sizeof(hdr) - 2) { hdr[hl++] = '\r'; hdr[hl++] = '\n'; }
+        ok = sendAll(req->itsHandle, hdr, hl) &&
+             (req->headOnly || bodyLen == 0 || sendAll(req->itsHandle, body, bodyLen));
+    }
+    if (body && freeBody) heap_caps_free(body);
+    return ok;
+}
+
 static void processFileRequest(web_file_req_t* req) {
     /* Try primary path (.gz first if tryGz). If that fails, try fallback
      * (SPA index.html for extensionless paths / directory roots). */
@@ -768,6 +928,15 @@ static void processFileRequest(web_file_req_t* req) {
         fseek(fp, 0, SEEK_END);
         long fileSize = ftell(fp);
         fseek(fp, 0, SEEK_SET);
+
+        /* Whole-file paths (bypass Range/streaming): a registered extension
+         * transform (e.g. .md → HTML), or a gzip-on-disk file that a client
+         * which didn't advertise Accept-Encoding: gzip can't decode itself. */
+        web_file_transform_t xform = findExtTransform(req->name);
+        if (xform || (gzipped && !req->acceptGzip)) {
+            ok = serveWholeFile(req, fp, (size_t)fileSize, gzipped, xform);
+            goto done;
+        }
 
         /* Parse Range header now that we have the file size. */
         size_t rangeStart = 0, rangeEnd = 0;
@@ -873,6 +1042,7 @@ static bool spawnFileTask(int h, const char* fsPath, const char* fallbackPath,
     req->tryGz = tryGz;
     req->headOnly = headOnly;
     req->authEnabled = authEnabled();
+    req->acceptGzip = handles[h].acceptGzip;
     req->itsHandle = handles[h].itsHandle;
     req->slot = h;
     handles[h].sending = true;
@@ -1146,8 +1316,20 @@ static void tryParseRequest(int h) {
     dbg("%s /%s%s\n", method, path.c_str(), wh.tls ? " (TLS)" : "");
     bool isHead = strcmp(method, "HEAD") == 0;
 
+    /* Content-negotiation: remember whether the client can accept gzip, so the
+     * file worker only sends a .gz file's bytes verbatim (Content-Encoding:
+     * gzip) when the client advertised it — otherwise it inflates first. */
+    {
+        char ae[64] = {};
+        webHeaderField(wh.rbuf, consumed, "Accept-Encoding", ae, sizeof(ae));
+        wh.acceptGzip = strcasestr(ae, "gzip") != nullptr;
+    }
+
     /* ---- HTTPS redirect ---- */
-    if (!wh.tls && httpsOnly) {
+    /* Loopback (the device fetching its own pages, e.g. the LCD viewer pulling
+     * server-rendered Markdown from 127.0.0.1) is exempt: it talks plain HTTP so
+     * there's no self-signed cert to validate against itself. */
+    if (!wh.tls && httpsOnly && !ip_addr_isloopback(&wh.clientAddr)) {
         /* Check exception list */
         bool allowed = false;
         std::string fullPath = "/" + path;
@@ -1238,8 +1420,12 @@ static void tryParseRequest(int h) {
     if (!map) { consumeRequest(wh, consumed); serve404(h); return; }
 
     /* ---- Auth check for map entries ---- */
+    /* Loopback is trusted: a request from 127.0.0.1 is the device talking to its
+     * own web server (the LCD viewer fetching server-rendered Markdown), which
+     * carries no session cookie — so it bypasses realm checking entirely. */
     resolveAuth(wh, wh.rbuf, consumed);
-    if (authEnabled() && !map->auth.empty() && !realmInList(wh.authRealm, map->auth)) {
+    if (authEnabled() && !map->auth.empty() && !realmInList(wh.authRealm, map->auth) &&
+        !ip_addr_isloopback(&wh.clientAddr)) {
         consumeRequest(wh, consumed);
         serveRootIndex(h);
         return;
@@ -1798,7 +1984,11 @@ void webInit() {
 #endif
 
     cliRegisterCmd("web", cmdWeb);
-    spawnTask(webFileWorkerFn, "web_file", 5120, nullptr, 1, 1, STACK_DRAM);
+    /* 8 KB (was 5 KB): the file worker now also runs extension transforms
+     * (e.g. viewer's markdown→HTML via MD4C) and gzip inflate inline; the
+     * decompressor state and large buffers are on the heap, but MD4C parsing
+     * wants a few KB of stack headroom over plain file streaming. */
+    spawnTask(webFileWorkerFn, "web_file", 8192, nullptr, 1, 1, STACK_DRAM);
     webHandle = spawnTask(webTaskFn, "web", 8192, nullptr, 1, 1);
 }
 

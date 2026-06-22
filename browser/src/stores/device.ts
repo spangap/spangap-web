@@ -15,6 +15,10 @@ import { logSystemNotice } from './log'
 export const useDeviceStore = defineStore('device', () => {
   const settings: Record<string, any> = reactive({})
   const connected = ref(false)
+  /** True once a full storage dump has been received (the first {__dump:'e'}).
+   *  Unlike `connected` (DataChannel open), this guarantees s.* values are
+   *  populated — so consumers can read settings instead of seeing undefined. */
+  const synced = ref(false)
   /** True once the link is considered down (no pong for >4s, or the channel
    *  dropped after we'd been connected). Stays true through the reconnect until
    *  a fresh full storage dump lands — i.e. "reconnected AND resynced". Drives
@@ -314,7 +318,7 @@ export const useDeviceStore = defineStore('device', () => {
            replacing the old fixed 300ms timeout race. */
         if (json.__dump !== undefined) {
           if (json.__dump === 'b') clientInfoPushed = false
-          else if (json.__dump === 'e') { flushPendingSets(); pushClientInfo(); clearLinkDown() }
+          else if (json.__dump === 'e') { synced.value = true; flushPendingSets(); pushClientInfo(); clearLinkDown() }
           return
         }
         deepMerge(settings, json)
@@ -417,5 +421,5 @@ export const useDeviceStore = defineStore('device', () => {
     dc = null
   })
 
-  return { settings, connected, linkDown, get, set, sendJson, save, connect }
+  return { settings, connected, synced, linkDown, get, set, sendJson, save, connect }
 })

@@ -16,6 +16,31 @@ void webInit();
 void webMapAddIfAbsent(const char* url, const char* files,
                        int index_dirs, int dav, const char* auth);
 
+/* ---- File-extension content transforms ---- */
+
+/** Transform a whole file body into the response body, by file extension.
+ *  Invoked on web's file worker for any GET whose path ends in a registered
+ *  extension, with the file's FULL contents (already decompressed if the
+ *  on-disk file was .gz). On success: allocate the output via
+ *  heap_caps_malloc(..., MALLOC_CAP_SPIRAM), set *out / *outLen / *contentType
+ *  (a static string, e.g. "text/html; charset=utf-8") and return true — web
+ *  sends it uncompressed and heap_caps_free()s *out. Return false to fall
+ *  through to serving the raw file.
+ *
+ *  `path` is the request path (for sniffing/relative use). The transform runs
+ *  on the file worker: it may use a chunk of stack/PSRAM but must not block on
+ *  the network or take long. Registered at init only (no locking). */
+typedef bool (*web_file_transform_t)(const char* path,
+                                     const uint8_t* in, size_t inLen,
+                                     uint8_t** out, size_t* outLen,
+                                     const char** contentType);
+
+/** Register a transform for a comma-separated extension list (no dots, e.g.
+ *  "md,markdown,mkd"). A later registration for an already-claimed extension
+ *  is ignored. Call from a module's init hook; the owning straddle keeps web
+ *  agnostic of the format. */
+void webRegisterFileExt(const char* exts, web_file_transform_t cb);
+
 /* ---- Web's ITS ports ---- */
 
 /** Web's server ports — connections forwarded by net for plain HTTP / TLS. */
