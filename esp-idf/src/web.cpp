@@ -53,9 +53,9 @@ struct web_mime_t {
     std::string type;     /* MIME type, e.g. "text/html" */
 };
 
-static web_map_t webMaps[WEB_MAX_MAPS];
+PSRAM_BSS static web_map_t webMaps[WEB_MAX_MAPS];
 static int webMapCount = 0;
-static web_mime_t webMimes[WEB_MAX_MIMES];
+PSRAM_BSS static web_mime_t webMimes[WEB_MAX_MIMES];
 static int webMimeCount = 0;
 
 /* File-extension transforms (e.g. .md → text/html). Registered once at init by

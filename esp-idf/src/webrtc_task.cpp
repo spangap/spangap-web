@@ -136,7 +136,7 @@ static char iceUfrag[8];
 static char icePwd[28];
 
 /* DTLS */
-static mbedtls_ssl_context dtls;
+PSRAM_BSS static mbedtls_ssl_context dtls;
 static mbedtls_ssl_config  dtlsConf;
 static mbedtls_ssl_cookie_ctx cookieCtx;
 static bool dtlsReady = false;
@@ -148,9 +148,11 @@ static uint32_t timerStart;
 static uint32_t timerIntMs;
 static uint32_t timerFinMs;
 
-/* SCTP */
-static sctp_assoc_t sctp;
-static uint8_t sctpBuf[SCTP_BUF_SIZE];
+/* SCTP — association state + outgoing packet buffer, only ever touched in the
+ * webrtc task (never ISR/spinlock/flash-cache-disabled), so park the ~16 KB in
+ * PSRAM rather than internal DRAM. */
+PSRAM_BSS static sctp_assoc_t sctp;
+PSRAM_BSS static uint8_t sctpBuf[SCTP_BUF_SIZE];
 
 /* Handshake dedup: last handshake packet length (avoid reprocessing retransmits) */
 static size_t lastHandshakeLen = 0;
