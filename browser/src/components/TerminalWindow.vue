@@ -5,7 +5,6 @@
     :title="title"
     :visible="visible"
     :default-geom="defaultGeom"
-    :default-dock="defaultDock"
     :min-size="{ w: 10, h: 8 }"
     @update:visible="onVisibleChange"
   >
@@ -47,7 +46,9 @@ const emit = defineEmits<{
 function onVisibleChange(v: boolean) { emit('update:visible', v) }
 
 /* ── defaults + zoom persistence ── */
-/* Phone-sized initial layout: full-width, half-screen tall, docked top. */
+/* Phone-sized initial layout: on a phone every window opens full-screen
+ * (FloatingWindow forces full-bleed in compact mode), so geometry only matters
+ * on desktop. */
 const isPhoneInit = window.matchMedia?.('(max-width: 599px)').matches ?? false
 const DEFAULTS: Record<string, { x: number; y: number; w: number; h: number }> = {
   cli: { x: 12.5, y: 77.5, w: 75, h: 20 },
@@ -56,9 +57,6 @@ const DEFAULTS: Record<string, { x: number; y: number; w: number; h: number }> =
 const defaultGeom = isPhoneInit
   ? { x: 0, y: 0, w: 100, h: 50 }
   : (DEFAULTS[props.configPrefix] ?? DEFAULTS.cli)
-const defaultDock = isPhoneInit
-  ? { side: 'top' as const, size: 50 }
-  : null
 
 const BASE_FONT = 14
 const ZOOM_KEY = `spangap.win.${props.configPrefix}.zoom`

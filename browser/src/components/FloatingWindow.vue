@@ -47,7 +47,6 @@ let zCounter = 1000
 
 <script setup lang="ts">
 import { ref, reactive, watch, onMounted, onUnmounted, nextTick, computed } from 'vue'
-import { docks, layout, dockWindow, undockWindow, type DockSide } from '../modules/advanced'
 import { useCompact } from '../lib/viewport'
 import {
   registerWindow, unregisterWindow, setWindowTitle, setWindowVisible,
@@ -63,11 +62,8 @@ const props = withDefaults(defineProps<{
   visible: boolean
   canResizeV?: boolean
   canResizeH?: boolean
-  canDock?: boolean
   defaultGeom?: Geom
   minSize?: MinSize
-  /** Initial dock state when no localStorage entry exists yet. */
-  defaultDock?: { side: DockSide; size: number } | null
   /** Monotonic "raise me" nonce. Bumping it brings the window to the front
    *  even when it's already visible (a fresh open is raised by the visibility
    *  watch). Menu "show" actions increment this. */
@@ -75,10 +71,8 @@ const props = withDefaults(defineProps<{
 }>(), {
   canResizeV: true,
   canResizeH: true,
-  canDock: true,
   defaultGeom: () => ({ x: 25, y: 25, w: 50, h: 50 }),
   minSize: () => ({ w: 10, h: 8 }),
-  defaultDock: null,
   focusToken: 0,
 })
 
@@ -106,32 +100,19 @@ const shown = computed(() =>
 const zIndex = ref(zCounter)
 function bringToFront() { zIndex.value = ++zCounter; setWindowZ(props.id, zIndex.value) }
 
-/* ── geometry ── */
-const DOCK_THRESH = 1.5
-
+/* ── geometry ──
+ * Windows are pure floating (desktop) / full-screen (phone). Docking was
+ * removed, so the placement area is always the whole container. */
 const pctX = ref(props.defaultGeom.x)
 const pctY = ref(props.defaultGeom.y)
 const pctW = ref(props.defaultGeom.w)
 const pctH = ref(props.defaultGeom.h)
 
-let preDockW = pctW.value
-let preDockH = pctH.value
-
-const isDocked = computed(() => props.canDock && docks[props.id]?.side != null)
-
 const windowStyle = computed(() => {
-  /* Compact: full-bleed, geometry/dock ignored. Keep the live z so the focused
+  /* Compact: full-bleed, geometry ignored. Keep the live z so the focused
    * window still paints above any sibling that's mid-transition. */
   if (compact.value) {
     return { left: '0%', top: '0%', width: '100%', height: '100%', zIndex: zIndex.value }
-  }
-  const rect = isDocked.value ? layout.value.rects[props.id] : null
-  if (rect) {
-    return {
-      left: `${rect.x}%`, top: `${rect.y}%`,
-      width: `${rect.w}%`, height: `${rect.h}%`,
-      zIndex: zIndex.value,
-    }
   }
   return {
     left: `${pctX.value}%`, top: `${pctY.value}%`,
@@ -150,8 +131,6 @@ const STORAGE_KEY = `spangap.win.${props.id}`
 interface StoredState {
   x: number; y: number; w: number; h: number
   visible: boolean
-  dock: DockSide | null
-  dockSize: number
 }
 
 function loadState(): void {
@@ -163,39 +142,23 @@ function loadState(): void {
       if (typeof s.y === 'number') pctY.value = s.y
       if (typeof s.w === 'number') pctW.value = s.w
       if (typeof s.h === 'number') pctH.value = s.h
-      preDockW = pctW.value
-      preDockH = pctH.value
-      if (props.canDock && s.dock && typeof s.dockSize === 'number') {
-        dockWindow(props.id, s.dock as DockSide, s.dockSize)
-      }
       if (typeof s.visible === 'boolean' && s.visible !== props.visible) {
         emit('update:visible', s.visible)
       }
-      return
     }
-    /* No persisted state — apply defaultDock once if provided. The window
-     * is still saved with its dock side+size on the first interaction. */
-    if (props.canDock && props.defaultDock) {
-      dockWindow(props.id, props.defaultDock.side, props.defaultDock.size)
-    }
+    /* Unknown legacy fields (dock/dockSize from the removed docking feature)
+     * are simply ignored — no migration needed (per project convention). */
   } catch { /* corrupt JSON — ignore */ }
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 function saveState(): void {
-  /* Snapshot synchronously. The visibility-change watcher that calls
-   * undockWindow() runs after this saveState (also via the visibility
-   * watch), so reading dock state inside the timer would see the
-   * post-undock null and clobber persisted dock intent. */
-  const dock = props.canDock ? docks[props.id] : null
   const snapshot: StoredState = {
     x: Math.round(pctX.value * 10) / 10,
     y: Math.round(pctY.value * 10) / 10,
     w: Math.round(pctW.value * 10) / 10,
     h: Math.round(pctH.value * 10) / 10,
     visible: props.visible,
-    dock: (dock?.side as DockSide) ?? null,
-    dockSize: dock?.size ?? 0,
   }
   if (saveTimer) clearTimeout(saveTimer)
   saveTimer = setTimeout(() => {
@@ -213,75 +176,21 @@ function close() { emit('update:visible', false) }
 
 /* ── clamp ── */
 function clamp() {
-  const a = layout.value.floatingArea
-  const aw = a.right - a.left
-  const ah = a.bottom - a.top
-  pctW.value = Math.min(aw, Math.max(props.minSize.w, pctW.value))
-  pctH.value = Math.min(ah, Math.max(props.minSize.h, pctH.value))
-  pctX.value = Math.min(a.right - pctW.value, Math.max(a.left, pctX.value))
-  pctY.value = Math.min(a.bottom - pctH.value, Math.max(a.top, pctY.value))
+  pctW.value = Math.min(100, Math.max(props.minSize.w, pctW.value))
+  pctH.value = Math.min(100, Math.max(props.minSize.h, pctH.value))
+  pctX.value = Math.min(100 - pctW.value, Math.max(0, pctX.value))
+  pctY.value = Math.min(100 - pctH.value, Math.max(0, pctY.value))
 }
-
-/* Re-clamp when the floating area changes (another window docked/resized).
- * Skipped in compact mode — geometry is unused there and clamping against the
- * full-screen area would needlessly rewrite the persisted desktop geometry. */
-watch(() => layout.value.floatingArea, () => {
-  if (!compact.value && !isDocked.value && props.visible) clamp()
-}, { deep: true })
 
 /* ── container dimensions ── */
 function containerSize(): { cw: number; ch: number } {
   const el = windowRef.value?.parentElement
   return { cw: el?.clientWidth ?? 1, ch: el?.clientHeight ?? 1 }
 }
-function containerRect(): DOMRect | undefined {
-  return windowRef.value?.parentElement?.getBoundingClientRect()
-}
-
-/* ── dock edge detect ── */
-function detectDockEdge(): DockSide | null {
-  if (!props.canDock) return null
-  if (pctY.value + pctH.value >= 100 - DOCK_THRESH) return 'bottom'
-  if (pctY.value <= DOCK_THRESH) return 'top'
-  if (pctX.value <= DOCK_THRESH) return 'left'
-  if (pctX.value + pctW.value >= 100 - DOCK_THRESH) return 'right'
-  return null
-}
-
-/* ── dock / undock ── */
-function performDock(side: DockSide) {
-  preDockW = pctW.value
-  preDockH = pctH.value
-  const size = (side === 'top' || side === 'bottom') ? pctH.value : pctW.value
-  dockWindow(props.id, side, size)
-  saveState()
-}
-
-function performUndock(e: MouseEvent) {
-  const dock = docks[props.id]
-  const wasSide = dock?.side
-  if (wasSide === 'top' || wasSide === 'bottom') {
-    pctW.value = preDockW || pctW.value
-    pctH.value = dock.size
-  } else if (wasSide === 'left' || wasSide === 'right') {
-    pctH.value = preDockH || pctH.value
-    pctW.value = dock.size
-  }
-  undockWindow(props.id)
-  const cr = containerRect()
-  const { cw, ch } = containerSize()
-  if (cr) {
-    pctX.value = (e.clientX - cr.left) / cw * 100 - pctW.value / 2
-    pctY.value = (e.clientY - cr.top) / ch * 100 - 2
-  }
-  clamp()
-}
-
 /* ── drag ── */
 const MIN_DRAG_PX = 8
 let dragStartX = 0, dragStartY = 0, dragOffX = 0, dragOffY = 0
 let dragMoved = false
-let wasDockedOnDragStart = false
 
 let dragPointerId = -1
 
@@ -292,8 +201,6 @@ function startDrag(e: PointerEvent) {
   /* Only react to primary pointer (left-click for mouse, single-finger
    * for touch). Multi-touch / right-click drag would mis-track. */
   if (!e.isPrimary) return
-  wasDockedOnDragStart = isDocked.value
-  if (isDocked.value) performUndock(e)
   dragStartX = e.clientX
   dragStartY = e.clientY
   dragOffX = pctX.value
@@ -324,15 +231,8 @@ function endDrag(e: PointerEvent) {
   window.removeEventListener('pointermove', onDrag)
   window.removeEventListener('pointerup', endDrag)
   window.removeEventListener('pointercancel', endDrag)
-  if (dragMoved) {
-    const edge = detectDockEdge()
-    if (edge) performDock(edge)
-    else { clamp(); saveState() }
-  } else if (wasDockedOnDragStart) {
-    clamp(); saveState()
-  } else {
-    saveState()
-  }
+  clamp()
+  saveState()
 }
 
 /* ── resize ── */
@@ -347,16 +247,11 @@ let resizePointerId = -1
 function startResize(edge: Edge, e: PointerEvent) {
   bringToFront()
   if (!e.isPrimary) return
-  if (isDocked.value) {
-    const side = docks[props.id].side
-    const allowed = side === 'bottom' ? 'n' : side === 'top' ? 's' : side === 'left' ? 'e' : 'w'
-    if (!edge.includes(allowed as string)) return
-  }
   resizeEdge = edge
   resizeStartX = e.clientX
   resizeStartY = e.clientY
-  resizeStartW = isDocked.value ? docks[props.id].size : pctW.value
-  resizeStartH = isDocked.value ? docks[props.id].size : pctH.value
+  resizeStartW = pctW.value
+  resizeStartH = pctH.value
   resizeStartPX = pctX.value
   resizeStartPY = pctY.value
   resizePointerId = e.pointerId
@@ -371,27 +266,19 @@ function onResize(e: PointerEvent) {
   const dx = (e.clientX - resizeStartX) / cw * 100
   const dy = (e.clientY - resizeStartY) / ch * 100
 
-  if (isDocked.value) {
-    const dock = docks[props.id]
-    if (dock.side === 'bottom') dock.size = Math.max(props.minSize.h, resizeStartH - dy)
-    else if (dock.side === 'top') dock.size = Math.max(props.minSize.h, resizeStartH + dy)
-    else if (dock.side === 'right') dock.size = Math.max(props.minSize.w, resizeStartW - dx)
-    else if (dock.side === 'left') dock.size = Math.max(props.minSize.w, resizeStartW + dx)
-  } else {
-    if (resizeEdge.includes('e')) pctW.value = Math.max(props.minSize.w, resizeStartW + dx)
-    if (resizeEdge.includes('w')) {
-      const nw = Math.max(props.minSize.w, resizeStartW - dx)
-      pctX.value = resizeStartPX + resizeStartW - nw
-      pctW.value = nw
-    }
-    if (resizeEdge.includes('s')) pctH.value = Math.max(props.minSize.h, resizeStartH + dy)
-    if (resizeEdge.includes('n')) {
-      const nh = Math.max(props.minSize.h, resizeStartH - dy)
-      pctY.value = resizeStartPY + resizeStartH - nh
-      pctH.value = nh
-    }
-    clamp()
+  if (resizeEdge.includes('e')) pctW.value = Math.max(props.minSize.w, resizeStartW + dx)
+  if (resizeEdge.includes('w')) {
+    const nw = Math.max(props.minSize.w, resizeStartW - dx)
+    pctX.value = resizeStartPX + resizeStartW - nw
+    pctW.value = nw
   }
+  if (resizeEdge.includes('s')) pctH.value = Math.max(props.minSize.h, resizeStartH + dy)
+  if (resizeEdge.includes('n')) {
+    const nh = Math.max(props.minSize.h, resizeStartH - dy)
+    pctY.value = resizeStartPY + resizeStartH - nh
+    pctH.value = nh
+  }
+  clamp()
 }
 function endResize(e: PointerEvent) {
   if (e.pointerId !== resizePointerId) return
@@ -418,7 +305,7 @@ onMounted(() => {
   registerWindow(props.id, props.title, zIndex.value)
   setWindowVisible(props.id, props.visible)
   loadState()
-  if (!isDocked.value) clamp()
+  clamp()
 
   resizeObserver = new ResizeObserver(() => {
     const el = bodyRef.value
@@ -457,12 +344,7 @@ watch(() => props.visible, (vis) => {
   setWindowVisible(props.id, vis)
   if (vis) {
     bringToFront()
-    if (!isDocked.value) clamp()
-  } else if (props.canDock && docks[props.id]?.side) {
-    /* Window hidden while docked — release the dock slot so other windows
-     * can reclaim the space. The chosen side+size stays in localStorage and
-     * loadState() restores it on the next mount. */
-    undockWindow(props.id)
+    clamp()
   }
 })
 </script>

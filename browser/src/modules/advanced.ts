@@ -1,21 +1,26 @@
-import { ref, reactive, computed } from 'vue'
+import { ref } from 'vue'
 import { useMenuStore } from '../stores/menu'
+import { registerApp } from '../lib/apps'
 
 /* ── Visibility ──
  * These start false; FloatingWindow restores its own saved visibility from
  * localStorage on mount and emits update:visible to reflect it. */
 export const cliVisible = ref(false)
 export const logVisible = ref(false)
+/* Settings is now a first-class app window (the gear dock icon), not a drawer. */
+export const settingsVisible = ref(false)
 
 /* ── Focus nonces ──
  * Bumped by the show* helpers to raise an already-open window to the front.
  * MainLayout binds these to each window's `focus-token` prop. */
 export const cliFocus = ref(0)
 export const logFocus = ref(0)
+export const settingsFocus = ref(0)
 
-/* Menu "Window → …" actions: only ever show + raise, never hide. */
+/* Dock launch actions: only ever show + raise, never hide. */
 export function showCli() { cliVisible.value = true; cliFocus.value++ }
 export function showLog() { logVisible.value = true; logFocus.value++ }
+export function showSettings() { settingsVisible.value = true; settingsFocus.value++ }
 
 /* ── Log backlog ──
  * Number of bytes the /log WS should replay on connect. Stored in localStorage. */
@@ -25,101 +30,9 @@ function persistBacklog() {
   try { localStorage.setItem(BACKLOG_KEY, String(logBacklogBytes.value)) } catch { /* ignore */ }
 }
 
-/* ── Dock system ──
- * A window can be docked to one edge (top/bottom/left/right) or floating (null).
- * Docked windows expand: top/bottom → full width, left/right → full height,
- * within the area remaining after earlier-docked windows.
- * dockOrder determines priority — first entry gets full span. */
-
-export type DockSide = 'top' | 'bottom' | 'left' | 'right'
-
-interface DockInfo {
-  side: DockSide | null
-  size: number       // % — height for top/bottom, width for left/right
-}
-
-export const docks = reactive<Record<string, DockInfo>>({
-  cli: { side: null, size: 20 },
-  log: { side: null, size: 70 },
-})
-
-export const dockOrder = reactive<string[]>([])
-
-/** docks is seeded only with the platform windows (cli, log). Consumers
- *  add their own FloatingWindows (reticulous: Map/Reticulum/TCP/UDP/LoRa)
- *  with arbitrary ids, so create the entry on first dock rather than
- *  assuming it exists — otherwise docks[id].side throws "Cannot set
- *  properties of undefined". */
-function ensureDock(id: string): DockInfo {
-  let d = docks[id]
-  if (!d) { d = { side: null, size: 50 }; docks[id] = d }
-  return d
-}
-
-export function dockWindow(id: string, side: DockSide, size: number) {
-  const d = ensureDock(id)
-  d.side = side
-  d.size = size
-  const idx = dockOrder.indexOf(id)
-  if (idx >= 0) dockOrder.splice(idx, 1)
-  dockOrder.push(id)
-}
-
-export function undockWindow(id: string) {
-  const d = docks[id]
-  if (d) d.side = null
-  const idx = dockOrder.indexOf(id)
-  if (idx >= 0) dockOrder.splice(idx, 1)
-}
-
-/** Rect in container percentages */
-export interface Rect { x: number; y: number; w: number; h: number }
-interface Edges { top: number; left: number; right: number; bottom: number }
-
-/** Compute docked window rects + remaining floating area, respecting dock order */
-export const layout = computed(() => {
-  const avail: Edges = { top: 0, left: 0, right: 100, bottom: 100 }
-  const rects: Record<string, Rect> = {}
-
-  for (const id of dockOrder) {
-    const dock = docks[id]
-    if (!dock.side) continue
-    const s = dock.size
-
-    switch (dock.side) {
-      case 'bottom':
-        rects[id] = { x: avail.left, y: avail.bottom - s, w: avail.right - avail.left, h: s }
-        avail.bottom -= s
-        break
-      case 'top':
-        rects[id] = { x: avail.left, y: avail.top, w: avail.right - avail.left, h: s }
-        avail.top += s
-        break
-      case 'left':
-        rects[id] = { x: avail.left, y: avail.top, w: s, h: avail.bottom - avail.top }
-        avail.left += s
-        break
-      case 'right':
-        rects[id] = { x: avail.right - s, y: avail.top, w: s, h: avail.bottom - avail.top }
-        avail.right -= s
-        break
-    }
-  }
-
-  return { rects, floatingArea: { ...avail } }
-})
-
-/** CSS style for the video area — the rect remaining after all docked windows */
-export const videoStyle = computed(() => {
-  const a = layout.value.floatingArea
-  return {
-    position: 'absolute' as const,
-    top: `${a.top}%`,
-    left: `${a.left}%`,
-    width: `${a.right - a.left}%`,
-    height: `${a.bottom - a.top}%`,
-  }
-})
+/* Window docking was removed — windows are pure floating (desktop) / full-screen
+ * (phone). The old dock store (docks/dockOrder/dockWindow/undockWindow/layout)
+ * lived here; the bottom app Dock (Dock.vue + lib/apps.ts) replaces it. */
 
 import DeveloperPanel from '../panels/DeveloperPanel.vue'
 import { openEditor, isPathOpen } from './editor'
@@ -140,10 +53,16 @@ const EDIT_FILES: Array<[string, string]> = [
 
 export function registerAdvanced() {
   const menu = useMenuStore()
-  /* "Window" menu — foregrounds the CLI / System Log floating windows. */
-  menu.setMenu('window', { label: 'Window', placement: 4 })
-  menu.register('window/cli', 'CLI', { type: 'action', action: showCli })
-  menu.register('window/log', 'System Log', { type: 'action', action: showLog })
+
+  /* Platform dock apps. Settings (the gear) hosts the whole settings tree as a
+   * window now; CLI and System Log are the terminal windows. Placement orders
+   * them in the dock: Settings pinned first, CLI/Log next. */
+  registerApp({ id: 'settings', label: 'Settings', icon: 'gear', open: showSettings,
+                placement: 1, isOpen: () => settingsVisible.value })
+  registerApp({ id: 'cli', label: 'CLI', icon: 'cli', open: showCli,
+                placement: 2, isOpen: () => cliVisible.value })
+  registerApp({ id: 'log', label: 'System Log', icon: 'log', open: showLog,
+                placement: 3, isOpen: () => logVisible.value })
 
   /* #if 0 — Backlog Size / Edit / Developer Options removed from the menu.
    * The backing code (presets, editor, DeveloperPanel) is kept but no longer

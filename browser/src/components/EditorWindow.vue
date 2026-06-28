@@ -73,7 +73,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import FloatingWindow from './FloatingWindow.vue'
-import { layout } from '../modules/advanced'
 
 const props = defineProps<{
   id: string
@@ -84,17 +83,8 @@ const props = defineProps<{
 const emit = defineEmits<{ 'update:visible': [value: boolean] }>()
 function close() { emit('update:visible', false) }
 
-/* 2/3 × 2/3 of the free canvas (area not occupied by docked windows),
- * centered. Captured once at mount; FloatingWindow's clamp watcher will
- * keep us inside the floating area if docks change later. */
-const defaultGeom = (() => {
-  const a = layout.value.floatingArea
-  const aw = a.right - a.left
-  const ah = a.bottom - a.top
-  const w = aw * 2 / 3
-  const h = ah * 2 / 3
-  return { x: a.left + (aw - w) / 2, y: a.top + (ah - h) / 2, w, h }
-})()
+/* 2/3 × 2/3 of the canvas, centered. */
+const defaultGeom = { x: 100 / 6, y: 100 / 6, w: 200 / 3, h: 200 / 3 }
 
 /* Font size persisted globally for all editor windows. */
 const BASE_FONT = 14

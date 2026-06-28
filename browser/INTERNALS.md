@@ -1,5 +1,11 @@
 # spangap-browser — internals
 
+Package-scope notes for working in the npm half. The shell model (Dock, menu
+store, generated panels, the WebRTC session) is documented at
+[../docs/browser-shell.md](../docs/browser-shell.md) and
+[../docs/browser-shell-internals.md](../docs/browser-shell-internals.md); this
+file is about the package itself.
+
 ## Layout
 
 ```
@@ -7,84 +13,69 @@ browser/
 ├── package.json
 ├── tsconfig.json
 └── src/
-    ├── index.ts            re-exports (lib + stores)
-    ├── lib/                auth, device-url, reconnect, webrtc-session
-    ├── components/         SettingToggle/Slider/Select/Text, SettingsPanel,
-    │                       FloatingWindow, LogWindow, MenuBar, PanelHeading,
-    │                       TerminalWindow, EditorWindow
+    ├── index.ts            re-exports lib/* + stores/{device,log,menu}
+    ├── lib/                apps, generatedPanels, auth, device-url, reconnect,
+    │                       viewport, windows, webrtc-session
+    ├── components/         SettingToggle/Slider/Select/Text, PanelHeading,
+    │                       GeneratedPanel, GeneratedListRow, Dock, SettingsWindow,
+    │                       SettingsNavTree, FloatingWindow, LogWindow,
+    │                       TerminalWindow, EditorWindow, ConnectionOverlay, UsableArea
     ├── stores/             device, log, menu, index
-    ├── modules/            advanced, editor, network, system
-    ├── panels/             AboutPanel, DeveloperPanel, NetworkPanel,
-    │                       SystemPanel, WifiScanDialog
+    ├── modules/            advanced, editor, system
     └── pages/              LoginPage, SetupPage
 ```
 
 ## Working in this subdir
 
-- The package ships TS source; the consumer's Vite/bundler handles
-  compilation. No `tsc` dist build.
-- Subpath imports: components, panels, pages are `.vue`; modules and
-  lib are `.ts`. Import them per the `exports` map in `package.json`.
-- Camera, video player, RTSP, recording UI live in the consuming app
-  (e.g. seccam), not here.
-- Modules in `modules/` self-register with the menu registry **on
-  import**. Don't put side effects in `lib/` or `components/`.
-- Components use Quasar primitives + scoped styles. Global app CSS
-  stays in the consuming app.
-
-## Pairing with `spangap-web` firmware
-
-The browser package shape mirrors what's exposed over the storage
-DataChannel and the various WS / HTTP endpoints from `spangap-web` and
-the other firmware straddles. When firmware changes its public
-protocol (config keys, storage tree shape, DC port assignments), the
-browser must follow in lockstep. Versions move together until we settle
-on a real release cadence.
+- The package ships TS/Vue source; the consumer's Vite/Quasar bundler compiles it.
+  No `tsc` dist build.
+- Subpath imports follow the `exports` map in `package.json`: `lib/*` and
+  `stores/*` are `.ts`; `components/*`, `panels/*`, `pages/*` are `.vue`. The
+  package root (`index.ts`) re-exports the `lib/*` modules and the three stores.
+- **Side effects live only in `modules/`.** A `modules/*.ts` self-registers with
+  the menu store on import; keep `lib/` and `components/` side-effect free so the
+  activator's import order stays predictable.
+- Components use Quasar primitives + scoped styles; global app CSS stays in the
+  consuming app.
+- Camera / video player / RTSP / recording UI live in the consuming app, not here.
 
 ## peerDependencies
 
-Listed in `package.json` as peer deps so the consuming app provides
-one copy:
+Listed as peer deps so the consuming app provides one copy: `vue` (3.x),
+`quasar` + `@quasar/extras`, `pinia`, `vue-router`. The package depends directly
+on `@xterm/xterm` + `@xterm/addon-fit` (the terminal in `TerminalWindow.vue`) and
+the workbox / service-worker runtime helpers. The consuming app builds them all
+into one bundle with its own Quasar/Vite pipeline; the built SPA is served
+read-only from `/fixed/webroot/` on the device.
 
-- `vue` (3.x)
-- `quasar` + `@quasar/extras`
-- `pinia`
-- `vue-router`
-- `@xterm/xterm` (terminal in `TerminalWindow.vue`)
+## Pairing with the firmware half
 
-The consuming app builds them all into one bundle with its own Quasar/
-Vite pipeline. The built SPA is served read-only from
-`/fixed/webroot/` on the device.
+The package shape mirrors what the firmware exposes over the storage DataChannel
+and the WS / HTTP endpoints. When firmware changes its public protocol (config
+keys, storage tree shape, DC port assignments), the browser follows in lockstep;
+the two versions move together.
 
 ## Activator integration
 
-When `spangap-web` is in the firmware build graph (and `--no-web-ui` is
-not set), the build CLI generates a browser dispatcher that:
+When `spangap-web` is in the firmware build graph (and `--no-web-ui` is not set),
+the build generates a dispatcher (`straddles.gen.ts`) that walks every consumed
+straddle's `browser/` subdir, imports its `register*` module (self-registering its
+apps and menu items), registers its declarative settings panels via
+`registerGeneratedPanels`, and bundles its app icons via `registerAppIcons`. This
+package's `modules/` are picked up the same way — there is no hard-coded list.
 
-1. Walks every consumed straddle's `browser/` subdir.
-2. Imports each `modules/<prefix>.ts` so they self-register.
-3. Wires their panels and pages into the menu and router.
+## Adding panels
 
-This package's `modules/` are picked up the same way — there is no
-hard-coded list anywhere.
-
-## Conventions for adding panels
-
-Place app-specific panels in the **consuming app**'s tree (e.g.
-`hw-tdeck/web-interface/src/`) when they are app-only. Place
-straddle-owned panels in *that straddle's* `browser/src/panels/` and
-register them from `browser/src/modules/<prefix>.ts`.
-
-A self-registering module looks like:
+- A **generated** pane: add a `settings:` block to the owning straddle.yaml; the
+  build lowers it to a `GenPanel` descriptor and `GeneratedPanel.vue` renders it.
+- A **hand-written** pane: place `MyPanel.vue` in the owning straddle's
+  `browser/src/panels/` and register it from that straddle's `register*` module:
 
 ```typescript
-// browser/src/modules/<prefix>.ts
-import { menuRegistry } from 'spangap-browser';
-
-menuRegistry.register({
-  group: 'My Group',
-  id: 'my-panel',
-  label: 'My Panel',
-  component: () => import('../panels/MyPanel.vue'),
-});
+import { useMenuStore } from 'spangap-browser'
+useMenuStore().register('settings/my-group/my-panel', 'My Panel',
+  { type: 'panel', component: () => import('../panels/MyPanel.vue') })
 ```
+
+App-only panes that belong to the consuming app (not a straddle) live in that
+app's tree, registered the same way.

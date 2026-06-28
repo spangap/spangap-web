@@ -5,7 +5,6 @@
     :title="title"
     :visible="visible"
     :default-geom="defaultGeom"
-    :default-dock="defaultDock"
     :min-size="{ w: 10, h: 8 }"
     @update:visible="onVisibleChange"
   >
@@ -35,16 +34,13 @@ const props = defineProps<{
 const emit = defineEmits<{ 'update:visible': [value: boolean] }>()
 function onVisibleChange(v: boolean) { emit('update:visible', v) }
 
-/* Phone-sized initial layout: full-width, half-screen tall, docked top.
- * Sampled once at load — Quasar's reactive `screen` would over-engineer
- * a one-time default. */
+/* Phone-sized initial layout: on a phone the window opens full-screen
+ * (FloatingWindow forces full-bleed in compact mode), so geometry only matters
+ * on desktop. Sampled once at load. */
 const isPhoneInit = window.matchMedia?.('(max-width: 599px)').matches ?? false
 const defaultGeom = isPhoneInit
   ? { x: 0, y: 0, w: 100, h: 50 }
   : { x: 12.5, y: 2.5, w: 75, h: 70 }
-const defaultDock = isPhoneInit
-  ? { side: 'top' as const, size: 50 }
-  : null
 
 const BASE_FONT = 14
 const ZOOM_KEY = 'spangap.win.log.zoom'
