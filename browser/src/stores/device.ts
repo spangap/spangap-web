@@ -19,7 +19,7 @@ export const useDeviceStore = defineStore('device', () => {
    *  Unlike `connected` (DataChannel open), this guarantees s.* values are
    *  populated — so consumers can read settings instead of seeing undefined. */
   const synced = ref(false)
-  /** True once the link is considered down (no pong for >4s, or the channel
+  /** True once the link is considered down (no pong for >LINK_DOWN_MS, or the channel
    *  dropped after we'd been connected). Stays true through the reconnect until
    *  a fresh full storage dump lands — i.e. "reconnected AND resynced". Drives
    *  the full-screen ConnectionOverlay. */
@@ -31,8 +31,8 @@ export const useDeviceStore = defineStore('device', () => {
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
   let knownAssetId: number | null = null
   let lastRx = 0
-  /** Wall-clock of the last pong (or channel open). The 1s ping loop declares
-   *  the link down when this is >4s stale. */
+  /** Wall-clock of the last pong (or channel open). The ping loop declares
+   *  the link down when this is >LINK_DOWN_MS stale. */
   let lastPongAt = 0
   /** Set once the storage channel has opened at least once, so the liveness
    *  check and drop-detection only fire after a real connection existed. */
@@ -297,7 +297,7 @@ export const useDeviceStore = defineStore('device', () => {
       connected.value = true
       everConnected = true
       lastRx = Date.now()
-      lastPongAt = Date.now()      /* fresh baseline so the 4s check doesn't trip */
+      lastPongAt = Date.now()      /* fresh baseline so the liveness check doesn't trip */
       clientInfoPushed = false
       startHeartbeat()
       flushPendingSets()
@@ -341,18 +341,27 @@ export const useDeviceStore = defineStore('device', () => {
     dc.onerror = () => { /* onclose fires next */ }
   }
 
+  /* Active-ping cadence and the no-pong window that declares the link down.
+     The device can legitimately go heads-down for the better part of a second
+     during an inbound-message burst (storage + lxmf + web all share one core),
+     so we absorb ~1 pong's worth of silence as deliberate resistance —
+     LINK_DOWN_MS = one ping cadence + ~1s grace. Past that a real vanish is
+     surfaced promptly (~2s, not the old 4s); a hard transport close still trips
+     enterLinkDown instantly via dc.onclose, so genuine disconnects stay
+     visible right away. */
+  const PING_MS = 1000
+  const LINK_DOWN_MS = 2000
   function startHeartbeat() {
     stopHeartbeat()
-    /* Active 1s ping. The device echoes {"pong":1}; lastPongAt tracks the last
-       reply. 4s without a pong → the link is down: overlay + log/cli notice +
-       forced reconnect (see enterLinkDown). Only meaningful once a real link
-       existed, so a slow first connect doesn't flash the overlay. */
+    /* Active ping. The device echoes {"pong":1}; lastPongAt tracks the last
+       reply. Only meaningful once a real link existed, so a slow first connect
+       doesn't flash the overlay. */
     heartbeatTimer = setInterval(() => {
       if (dc && dc.readyState === 'open') {
         try { dc.send('{"ping":1}') } catch { /* ignore */ }
       }
-      if (everConnected && Date.now() - lastPongAt > 4000) enterLinkDown()
-    }, 1000)
+      if (everConnected && Date.now() - lastPongAt > LINK_DOWN_MS) enterLinkDown()
+    }, PING_MS)
   }
 
   function stopHeartbeat() {

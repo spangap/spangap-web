@@ -168,8 +168,9 @@ static uint32_t udpTxDropLogMs = 0;
  * this short inactivity teardown is the backstop for an *unclean* vanish (sleep,
  * crash, hard network drop), reclaiming the single-session slot in seconds
  * instead of the old 45s. It's comfortably above the 1s ping cadence and the
- * browser's own 4s "disconnected" threshold, so a peer that briefly stalls and
- * resumes pinging keeps its transport. */
+ * browser's own ~2s "disconnected" threshold (LINK_DOWN_MS in the browser
+ * device store), so a peer that briefly stalls and resumes pinging keeps its
+ * transport. */
 static constexpr uint32_t UDP_TIMEOUT_MS = 8000;
 
 /* Signaling WS */
