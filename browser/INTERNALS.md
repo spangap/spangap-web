@@ -39,6 +39,39 @@ browser/
   consuming app.
 - Camera / video player / RTSP / recording UI live in the consuming app, not here.
 
+## Shell shape (Dock, Settings-as-window, no docking)
+
+The full shell narrative lives in the `../docs/browser-shell*.md` files; the
+package-structural invariants that matter when editing components here:
+
+- **No menu-bar / hamburger / drawer chrome.** `MenuBar.vue` and the settings
+  q-drawer (`SettingsPanel.vue`) were deleted. The shell is the bottom
+  `Dock.vue` plus a set of windows. The Dock is a centered floating bar on
+  desktop and an iOS-style bottom nav on a phone (first four apps + a "More"
+  overflow, gated on `useCompact()` from `lib/viewport.ts`); it renders one icon
+  per entry in the app registry (`lib/apps.ts` — `registerApp` / `sortedApps`),
+  each straddle registering its window from the same `register*` module that
+  wires its menu items. Clicking an icon calls the entry's `open()`; `isOpen()`
+  drives the running-app indicator.
+- **Settings is an app window**, not a drawer: `SettingsWindow.vue` +
+  recursive `SettingsNavTree.vue` (the gear Dock icon) host the same
+  `settings/…` menu tree (nav rail + panel pane on desktop, drill-down on
+  phone), and generated settings panes mount inside it. The menu store stays for
+  that settings hierarchy; only the old `window/*` menu actions went away.
+- **No window docking.** `FloatingWindow.vue` is pure floating on desktop and
+  full-screen on a phone. The dock store (`docks` / `dockOrder` / `dockWindow` /
+  `layout`, and per-window `canDock` / `defaultDock`) is gone from
+  `modules/advanced.ts`; legacy dock/dockSize fields left in persisted window
+  state are ignored, with no migration.
+- **App icons are inlined, not served.** The launcher SVGs are the single icon
+  source shared with the LCD tiles: the activator globs each straddle's
+  `src/app-icons/*.svg` as raw strings and calls `registerAppIcons`, and the
+  Dock injects the matching SVG inline via `v-html` (`appIconSvg(icon)`),
+  falling back to a letter badge (`label.charAt(0)`) when none is bundled
+  (nomad / announces have no SVG). The device webroot ships only `app.js`, so no
+  `/app-icons/*.svg` asset ever reaches the device — bundling the SVG source is
+  what makes an icon appear.
+
 ## peerDependencies
 
 Listed as peer deps so the consuming app provides one copy: `vue` (3.x),
