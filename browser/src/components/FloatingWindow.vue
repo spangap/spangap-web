@@ -68,19 +68,23 @@ const props = withDefaults(defineProps<{
    *  even when it's already visible (a fresh open is raised by the visibility
    *  watch). Menu "show" actions increment this. */
   focusToken?: number
+  /** Optional body aspect ratio (width / height). When > 0, resizing keeps the
+   *  body proportional to it (e.g. a device screen mirror). 0 = free resize. */
+  aspect?: number
 }>(), {
   canResizeV: true,
   canResizeH: true,
   defaultGeom: () => ({ x: 25, y: 25, w: 50, h: 50 }),
   minSize: () => ({ w: 10, h: 8 }),
   focusToken: 0,
+  aspect: 0,
 })
 
 const emit = defineEmits<{
   'update:visible': [value: boolean]
 }>()
 
-defineExpose({ bringToFront, flashTitleBar })
+defineExpose({ bringToFront, flashTitleBar, fitBodyPx })
 
 /* ── refs ── */
 const windowRef = ref<HTMLElement>()
@@ -127,6 +131,9 @@ let resizeObserver: ResizeObserver | null = null
 
 /* ── persistence ── */
 const STORAGE_KEY = `spangap.win.${props.id}`
+/* True once a saved geometry has been restored — fitBodyPx respects a user's
+ * chosen size and only auto-sizes a window that has never been placed. */
+let hadStored = false
 
 interface StoredState {
   x: number; y: number; w: number; h: number
@@ -137,6 +144,7 @@ function loadState(): void {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
+      hadStored = true
       const s = JSON.parse(raw) as Partial<StoredState>
       if (typeof s.x === 'number') pctX.value = s.x
       if (typeof s.y === 'number') pctY.value = s.y
@@ -186,6 +194,47 @@ function clamp() {
 function containerSize(): { cw: number; ch: number } {
   const el = windowRef.value?.parentElement
   return { cw: el?.clientWidth ?? 1, ch: el?.clientHeight ?? 1 }
+}
+
+/* ── aspect lock (opt-in via props.aspect) ──
+ * Geometry is in % of the container; the body is the window minus its chrome
+ * (titlebar/borders). chromePctH() is that chrome height as a % of the container,
+ * so the aspect math constrains the BODY, not the whole window. */
+function chromePctH(): number {
+  const el = windowRef.value, b = bodyRef.value
+  if (!el || !b) return 0
+  const { ch } = containerSize()
+  return Math.max(0, el.clientHeight - b.clientHeight) / ch * 100
+}
+
+/* Keep the body proportional to props.aspect. `horizontal` = the drag changed
+ * width (derive height); otherwise the drag changed height (derive width). */
+function applyAspect(horizontal: boolean): void {
+  if (!props.aspect) return
+  const { cw, ch } = containerSize()
+  const cph = chromePctH()
+  if (horizontal) {
+    const bottom = pctY.value + pctH.value
+    pctH.value = pctW.value * cw / (ch * props.aspect) + cph
+    if (resizeEdge.includes('n')) pctY.value = bottom - pctH.value   /* keep bottom anchored */
+  } else {
+    pctW.value = (pctH.value - cph) * ch * props.aspect / cw
+  }
+}
+
+/* Size the window so its BODY is ~w×h device pixels (the screen's native size),
+ * proportional to props.aspect. No-op once the user has placed the window. */
+function fitBodyPx(w: number, h: number): void {
+  if (hadStored) return
+  const { cw, ch } = containerSize()
+  pctW.value = Math.min(90, Math.max(props.minSize.w, w / cw * 100))
+  applyAspect(true)                 /* derive height from width + chrome */
+  if (pctH.value > 90) { pctH.value = 90; applyAspect(false) }
+  /* Centre the freshly-sized window. */
+  pctX.value = Math.max(0, (100 - pctW.value) / 2)
+  pctY.value = Math.max(0, (100 - pctH.value) / 2)
+  clamp()
+  saveState()
 }
 /* ── drag ── */
 const MIN_DRAG_PX = 8
@@ -278,6 +327,9 @@ function onResize(e: PointerEvent) {
     pctY.value = resizeStartPY + resizeStartH - nh
     pctH.value = nh
   }
+  /* Aspect lock: a horizontal-edge drag drives width→height, a vertical-edge
+   * drag drives height→width, so the mirror stays proportional either way. */
+  applyAspect(resizeEdge.includes('e') || resizeEdge.includes('w'))
   clamp()
 }
 function endResize(e: PointerEvent) {

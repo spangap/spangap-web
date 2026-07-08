@@ -758,6 +758,13 @@ static void webrtcDcOpen(sctp_assoc_t* a, int chIdx) {
     dcMap[slot].handle   = handle;
     dcMap[slot].streamId = ch->streamId;
     dcMap[slot].priority = ch->priority;
+    /* The screen mirror is bulk pixel data on the same SCTP association as the
+     * control channels (storage/cli/log, priority 256). Browsers don't expose a
+     * DCEP priority, so pin it below control here: the strict-priority scheduler
+     * then always drains storage etc. first, and the mirror only uses the link
+     * when control traffic is idle. Without this a busy mirror can delay the
+     * storage heartbeat's pong and make the whole session flap/reconnect. */
+    if (strcmp(taskName, "lcdmirror") == 0) dcMap[slot].priority = 64;
 
     /* Grow the shared router receive buffer to fit this port's largest
        packet (its declared fromSize). Grow-only — a smaller DC reuses the
