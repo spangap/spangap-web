@@ -18,9 +18,8 @@
         flat
         round
         size="sm"
-        label="✕"
         @click="remove(item, idx)"
-      />
+      ><IconTrash /></q-btn>
     </div>
     <div v-if="!items.length" class="text-caption" style="opacity:0.6">(none)</div>
     <q-btn
@@ -38,6 +37,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useDeviceStore } from '../stores/device'
+import IconTrash from './IconTrash.vue'
 import type { GenRow } from '../lib/generatedPanels'
 
 const props = defineProps<{ row: GenRow }>()
