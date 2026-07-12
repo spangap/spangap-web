@@ -24,6 +24,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include "esp_heap_caps.h"
+#include "esp_memory_utils.h"   /* esp_ptr_external_ram / esp_ptr_in_dram — genBuf sanity */
 #include "mbedtls/sha1.h"
 #include "mbedtls/base64.h"
 #include "cJSON.h"
@@ -563,6 +564,27 @@ struct web_handle_t {
 static web_handle_t* handles = nullptr;
 static int webMaxHandles = 8;
 
+/* Release a generated-content buffer, but only if genBuf really is a heap
+ * pointer. genBuf lives inside the heap-allocated handles[] array; a wild write
+ * from anywhere in the firmware can corrupt that slot, leaving genBuf pointing
+ * outside every heap. heap_caps_free() asserts on such a pointer ("free() target
+ * pointer is outside heap areas") and panics the *whole device* — rebooting the
+ * LCD UI and everything else. Range-check first: a valid SPIRAM/internal pointer
+ * is freed as normal; a corrupt one is logged (with its value, to fingerprint the
+ * corruptor) and dropped — a one-off leak instead of a system-wide reboot loop.
+ * All real genBuf allocations come from heap_caps_malloc, so no valid free is
+ * ever skipped. */
+static void freeGenBuf(web_handle_t& wh) {
+    uint8_t* p = wh.genBuf;
+    wh.genBuf = nullptr;
+    if (!p) return;
+    if (esp_ptr_external_ram(p) || esp_ptr_in_dram(p)) {
+        heap_caps_free(p);
+    } else {
+        err("genBuf=%p outside heap — dropping (heap corruption upstream)\n", p);
+    }
+}
+
 static int webAllocSlot(int itsH) {
     for (int i = 0; i < webMaxHandles; i++)
         if (handles[i].itsHandle < 0) { handles[i].itsHandle = itsH; return i; }
@@ -573,7 +595,7 @@ static void handleReset(int slot) {
     auto& wh = handles[slot];
     if (wh.putFile >= 0) { fs_close(wh.putFile); wh.putFile = -1; }
     if (wh.file >= 0) { fs_close(wh.file); wh.file = -1; }
-    if (wh.genBuf) { heap_caps_free(wh.genBuf); wh.genBuf = nullptr; }
+    freeGenBuf(wh);
     /* Preserve per-connection state across keep-alive request boundaries. */
     int       savedH    = wh.itsHandle;
     bool      savedTls  = wh.tls;
@@ -1892,7 +1914,7 @@ static void webTaskFn(void* arg) {
             if (wh.state == HS_SEND_BODY) {
                 if (trySendBody(h)) {
                     if (wh.file >= 0) { fs_close(wh.file); wh.file = -1; }
-                    if (wh.genBuf) { heap_caps_free(wh.genBuf); wh.genBuf = nullptr; }
+                    freeGenBuf(wh);
                     wh.state = HS_READING;
                     handleTouch(h);
                 }
