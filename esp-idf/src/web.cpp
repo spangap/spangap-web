@@ -1775,6 +1775,15 @@ static void webTaskFn(void* arg) {
         if (netIsUp()) return;
         for (int i = 0; i < webMaxHandles; i++) {
             if (handles[i].state != HS_IDLE && handles[i].itsHandle >= 0) {
+                if (handles[i].sending) {
+                    /* A webFileTask is still streaming on this slot — defer the
+                     * reset (and ITS teardown) to its done-aux so we don't reset
+                     * the slot or disconnect the handle out from under the task.
+                     * With wifi down its sendAll will fail promptly and fire
+                     * WEB_FILE_DONE, where wantsCleanup finishes the job. */
+                    handles[i].wantsCleanup = true;
+                    continue;
+                }
                 int itsH = handles[i].itsHandle;
                 handleReset(i);
                 handles[i].itsHandle = -1;
