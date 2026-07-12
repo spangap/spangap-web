@@ -16,6 +16,7 @@
 #include "compat.h"
 #include "fs.h"
 #include <algorithm>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <cctype>
@@ -327,6 +328,30 @@ static int xmlEscape(char* dst, size_t dstSz, const char* src) {
     return pos;
 }
 
+/* Bounded formatted append into a buffer.
+ *
+ * snprintf() returns the length it WOULD have written, not the truncated
+ * length. The naive `pos += snprintf(buf+pos, bufSz-pos, ...)` therefore lets
+ * `pos` run past `bufSz` when a single write is truncated; the NEXT call then
+ * computes `bufSz-pos` in size_t — a huge underflowed value — with `buf+pos`
+ * already past the allocation, and writes out of bounds, corrupting the
+ * adjacent heap block's TLSF metadata (the crash surfaces later at free()).
+ * This clamps `pos` into [0, bufSz-1] so `bufSz-pos` can never underflow:
+ * oversized content truncates cleanly instead of smashing the heap. */
+static void appendf(char* buf, size_t bufSz, int& pos, const char* fmt, ...)
+    __attribute__((format(printf, 4, 5)));
+static void appendf(char* buf, size_t bufSz, int& pos, const char* fmt, ...) {
+    if (pos < 0) pos = 0;
+    if ((size_t)pos + 1 >= bufSz) { pos = (int)bufSz - 1; return; }  /* full */
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + pos, bufSz - pos, fmt, ap);
+    va_end(ap);
+    if (n < 0) return;
+    pos += n;
+    if ((size_t)pos >= bufSz) pos = (int)bufSz - 1;  /* truncated: clamp to content */
+}
+
 static char* generatePropfind(const std::string& urlPath, const char* fsPath,
                                int depth, size_t* outLen) {
     struct stat st;
@@ -354,12 +379,12 @@ static char* generatePropfind(const std::string& urlPath, const char* fsPath,
         }
     }
 
-    size_t bufSz = 512 + (1 + childCount) * 500;
+    size_t bufSz = 512 + (1 + childCount) * 768;
     char* buf = (char*)heap_caps_malloc(bufSz, MALLOC_CAP_SPIRAM);
     if (!buf) { free(entries); return nullptr; }
 
     int pos = 0;
-    pos += snprintf(buf+pos, bufSz-pos,
+    appendf(buf, bufSz, pos,
         "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
         "<D:multistatus xmlns:D=\"DAV:\">\n");
 
@@ -370,17 +395,17 @@ static char* generatePropfind(const std::string& urlPath, const char* fsPath,
         gmtime_r(&mtime, &tm);
         char date[48];
         strftime(date, sizeof(date), "%a, %d %b %Y %H:%M:%S GMT", &tm);
-        pos += snprintf(buf+pos, bufSz-pos,
+        appendf(buf, bufSz, pos,
             "<D:response><D:href>%s</D:href><D:propstat><D:prop>\n", esc);
         if (dir)
-            pos += snprintf(buf+pos, bufSz-pos,
+            appendf(buf, bufSz, pos,
                 "<D:resourcetype><D:collection/></D:resourcetype>\n");
         else
-            pos += snprintf(buf+pos, bufSz-pos,
+            appendf(buf, bufSz, pos,
                 "<D:resourcetype/>\n<D:getcontentlength>%u</D:getcontentlength>\n"
                 "<D:getcontenttype>%s</D:getcontenttype>\n",
                 (unsigned)size, mimeType(href));
-        pos += snprintf(buf+pos, bufSz-pos,
+        appendf(buf, bufSz, pos,
             "<D:getlastmodified>%s</D:getlastmodified>\n"
             "</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n",
             date);
@@ -397,7 +422,7 @@ static char* generatePropfind(const std::string& urlPath, const char* fsPath,
         addResponse(href.c_str(), e.mtime, e.size, e.isDir);
     }
 
-    pos += snprintf(buf+pos, bufSz-pos, "</D:multistatus>\n");
+    appendf(buf, bufSz, pos, "</D:multistatus>\n");
     free(entries);
     *outLen = pos;
     return buf;
@@ -446,12 +471,12 @@ static char* generateDirIndex(const std::string& urlDir, const char* fsDir, size
         return strcasecmp(a.name, b.name) < 0;
     });
 
-    size_t bufSz = 512 + count * 300;
+    size_t bufSz = 512 + count * 512;
     char* buf = (char*)heap_caps_malloc(bufSz, MALLOC_CAP_SPIRAM);
     if (!buf) { free(entries); return nullptr; }
 
     int pos = 0;
-    pos += snprintf(buf + pos, bufSz - pos,
+    appendf(buf, bufSz, pos,
         "<html><head><title>%s</title></head>\n"
         "<body style=\"font-family:monospace\">\n<h2>%s</h2><hr><pre>\n",
         urlDir.c_str(), urlDir.c_str());
@@ -462,7 +487,7 @@ static char* generateDirIndex(const std::string& urlDir, const char* fsDir, size
         if (parent.back() == '/') parent.pop_back();
         size_t ls = parent.rfind('/');
         parent = (ls != std::string::npos) ? parent.substr(0, ls + 1) : "/";
-        pos += snprintf(buf + pos, bufSz - pos, "<a href=\"%s\">..</a>\n", parent.c_str());
+        appendf(buf, bufSz, pos, "<a href=\"%s\">..</a>\n", parent.c_str());
     }
 
     for (int i = 0; i < count && pos < (int)bufSz - 256; i++) {
@@ -472,14 +497,14 @@ static char* generateDirIndex(const std::string& urlDir, const char* fsDir, size
         char sz[16];
         if (e.isDir) snprintf(sz, sizeof(sz), "[dir]");
         else fmtSize(e.size, sz, sizeof(sz));
-        pos += snprintf(buf + pos, bufSz - pos,
+        appendf(buf, bufSz, pos,
             "%04d-%02d-%02d %02d:%02d  %8s  <a href=\"%s%s%s\">%s%s</a>\n",
             tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min,
             sz, urlDir.c_str(), e.name, e.isDir ? "/" : "",
             e.name, e.isDir ? "/" : "");
     }
 
-    pos += snprintf(buf + pos, bufSz - pos, "</pre><hr></body></html>\n");
+    appendf(buf, bufSz, pos, "</pre><hr></body></html>\n");
     free(entries);
     *outLen = pos;
     return buf;
