@@ -195,6 +195,7 @@ function buildChannel(pc: RTCPeerConnection) {
     flushPending()   // send any key pressed while the channel was down
   }
   dc.onmessage = (ev) => {
+    getSession().noteDcActivity()
     if (!term) return
     const raw = typeof ev.data === 'string'
       ? ev.data

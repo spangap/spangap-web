@@ -30,9 +30,9 @@ export const useDeviceStore = defineStore('device', () => {
   let unregisterBuilder: (() => void) | null = null
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null
   let knownAssetId: number | null = null
-  let lastRx = 0
   /** Wall-clock of the last pong (or channel open). The ping loop declares
-   *  the link down when this is >LINK_DOWN_MS stale. */
+   *  the link down when both this AND session.lastDcRxAt (traffic on any
+   *  DataChannel) are >LINK_DOWN_MS stale. */
   let lastPongAt = 0
   /** Set once the storage channel has opened at least once, so the liveness
    *  check and drop-detection only fire after a real connection existed. */
@@ -296,7 +296,6 @@ export const useDeviceStore = defineStore('device', () => {
     dc.onopen = () => {
       connected.value = true
       everConnected = true
-      lastRx = Date.now()
       lastPongAt = Date.now()      /* fresh baseline so the liveness check doesn't trip */
       clientInfoPushed = false
       startHeartbeat()
@@ -307,7 +306,7 @@ export const useDeviceStore = defineStore('device', () => {
       const text = typeof ev.data === 'string'
         ? ev.data
         : new TextDecoder().decode(ev.data instanceof ArrayBuffer ? ev.data : (ev.data as Uint8Array).buffer)
-      lastRx = Date.now()
+      session.noteDcActivity()
       try {
         const json = JSON.parse(text)
         if (json.pong) { lastPongAt = Date.now(); return }
@@ -355,12 +354,16 @@ export const useDeviceStore = defineStore('device', () => {
     stopHeartbeat()
     /* Active ping. The device echoes {"pong":1}; lastPongAt tracks the last
        reply. Only meaningful once a real link existed, so a slow first connect
-       doesn't flash the overlay. */
+       doesn't flash the overlay. Inbound traffic on ANY DataChannel of the
+       session (session.lastDcRxAt) counts the same as a pong: during a bulk
+       burst on a sibling channel (e.g. a huge `show` on cli) the pong can
+       queue behind the flood, but the arriving flood itself proves the link. */
     heartbeatTimer = setInterval(() => {
       if (dc && dc.readyState === 'open') {
         try { dc.send('{"ping":1}') } catch { /* ignore */ }
       }
-      if (everConnected && Date.now() - lastPongAt > LINK_DOWN_MS) enterLinkDown()
+      const lastAlive = Math.max(lastPongAt, session.lastDcRxAt)
+      if (everConnected && Date.now() - lastAlive > LINK_DOWN_MS) enterLinkDown()
     }, PING_MS)
   }
 

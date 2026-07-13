@@ -765,6 +765,14 @@ static void webrtcDcOpen(sctp_assoc_t* a, int chIdx) {
      * when control traffic is idle. Without this a busy mirror can delay the
      * storage heartbeat's pong and make the whole session flap/reconnect. */
     if (strcmp(taskName, "lcdmirror") == 0) dcMap[slot].priority = 64;
+    /* Storage is the session's heartbeat channel and everything on it is tiny
+     * (pong, coalesced patches). Pin it above the browser default (256) so a
+     * bulk burst on a sibling — a `show s.lxmf` flood on cli, a log backlog —
+     * can't starve the pong: the strict-priority scheduler serves storage
+     * first, and the 512 rexmit-pool quota tier (7/8) keeps insert headroom
+     * above the 256 tier's 3/4 cap, so a sibling that has saturated its own
+     * quota can never block a pong from entering the pool. */
+    if (strcmp(taskName, "storage") == 0) dcMap[slot].priority = 512;
 
     /* Grow the shared router receive buffer to fit this port's largest
        packet (its declared fromSize). Grow-only — a smaller DC reuses the

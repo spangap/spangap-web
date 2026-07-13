@@ -95,6 +95,16 @@ freed rexmit slots first. On `sendto` returning `EAGAIN`, the BIO retries with
 short yields rather than propagating WANT_WRITE on the first hiccup; a partial
 SCTP record is never emitted — the whole fragment goes or it retries.
 
+Priority also gates rexmit-pool admission: `rexmitQuota()` caps how much of the
+pool each tier may hold (≥1024 the full pool, ≥512 7/8, ≥256 3/4, below that
+1/2), so a lower tier that has saturated its own quota always leaves insert
+headroom for a higher one. The device overrides two labels at DC open:
+`storage:1` is pinned to 512 — it is the session's heartbeat channel and
+everything on it is tiny, so a bulk burst on a sibling at the browser-default
+256 can neither out-schedule a pong nor block it from entering the pool — and
+`lcdmirror:1` is demoted to 64 so bulk pixel data yields to all control
+traffic.
+
 ## 6. Signaling and session control
 
 `/webrtc` is forwarded by [web](web.md) as a WS connection. The ITS server port

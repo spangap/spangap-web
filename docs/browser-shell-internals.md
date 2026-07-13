@@ -84,7 +84,10 @@ the offer always carries the `m=application` line. `connect()` is idempotent.
 Close-code handling: `4401`→`auth`, `4409`→`busy`, `4008`→`kicked`; `busy`/`kicked`
 disable auto-reconnect and a takeover requires the user to opt in (`?force=1`).
 Reconnect resilience: heartbeat ping, a staleness check, and a visibility-change
-nudge for phone wake.
+nudge for phone wake. The staleness check compares against
+`max(lastPongAt, session.lastDcRxAt)` — every channel's `onmessage` calls
+`noteDcActivity()`, so any received byte counts as a pong and a flood on one
+channel that delays the storage pong doesn't trip a false link-down.
 
 ## 6. Pitfalls
 

@@ -47,6 +47,17 @@ class WebrtcSession {
   get state(): SessionState { return this._state }
   get pc(): RTCPeerConnection | null { return this._pc }
 
+  /** Wall-clock ms of the last inbound message on ANY DataChannel of this
+   *  session — consumers call noteDcActivity() from their onmessage. The
+   *  app-level liveness check (device store) treats this as proof-of-life
+   *  equivalent to a pong: a bulk burst on one channel (big CLI dump, log
+   *  backlog, mirror frames) can delay the storage pong behind it, but any
+   *  received byte proves the transport is alive. */
+  lastDcRxAt = 0
+
+  /** Record inbound DataChannel traffic for the app-level liveness check. */
+  noteDcActivity() { this.lastDcRxAt = Date.now() }
+
   /** Subscribe to state changes. Returns an unsubscribe fn. */
   onStateChange(cb: (s: SessionState) => void): () => void {
     this.listeners.add(cb)

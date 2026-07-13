@@ -77,6 +77,7 @@ function buildChannel(pc: RTCPeerConnection) {
     }
   }
   dc.onmessage = (ev) => {
+    getSession().noteDcActivity()
     emitLocal(decode(ev.data))
   }
   dc.onclose = () => {

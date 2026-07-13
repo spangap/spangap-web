@@ -122,7 +122,11 @@ The `device` store (`stores/device`) binds bidirectionally to the device storage
 tree over the `storage:1` DataChannel. On open the device sends a full dump, then
 coalesced nested-JSON merge-patches; the browser sends patches back. `{"save":1}`
 forces a flush, `{"ping":1}`/`{"pong":1}` is the heartbeat, and a `beforeunload`
-handler saves and closes on page unload. Components read with `device.get("s.…")`
+handler saves and closes on page unload. The link-down check accepts inbound
+traffic on *any* DataChannel of the session as proof-of-life, not just the pong:
+channel `onmessage` handlers call `session.noteDcActivity()`, so a bulk burst on
+a sibling channel (a huge CLI dump, a log backlog, mirror frames) that queues
+the pong behind it can't flag a live link as down. Components read with `device.get("s.…")`
 and write with `device.set("s.…", value)`. The store also auto-pushes the IANA
 timezone on first connect (if unset) and the client epoch time when the device
 clock is invalid, so the device gets time even without NTP.
