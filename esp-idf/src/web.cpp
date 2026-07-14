@@ -1976,6 +1976,7 @@ void webMapAddIfAbsent(const char* url, const char* files,
         if (strcmp(v, url) == 0) return;  /* already there */
     }
     char k[40];
+    storageBegin();
     snprintf(k, sizeof(k), "s.web.map.%d.url", n);
     storageSet(k, url);
     snprintf(k, sizeof(k), "s.web.map.%d.files", n);
@@ -1992,6 +1993,7 @@ void webMapAddIfAbsent(const char* url, const char* files,
         snprintf(k, sizeof(k), "s.web.map.%d.auth", n);
         storageSet(k, auth);
     }
+    storageEnd();
 }
 
 /* Module config version. Bump when adding/changing defaults. See duckdns.cpp.
@@ -2027,8 +2029,10 @@ void webInit() {
      * advertisement follows s.net.{http,https}_port. storageDefault is
      * idempotent, so a user who drops an entry to stop advertising isn't
      * overridden on the next boot. */
+    storageBegin();
     storageDefault("s.net.mdns.http",  "s.net.http_port");
     storageDefault("s.net.mdns.https", "s.net.https_port");
+    storageEnd();
 
     /* Base URL→filesystem mappings. webMapAddIfAbsent only adds if the URL
      * isn't already present — user customisations to s.web.map survive. */
