@@ -418,6 +418,14 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
+  /** Send a raw command object to the device WITHOUT merging it into the local
+   *  mirror (for control messages like {"fetch":...} that aren't config state). */
+  function sendCommand(obj: Record<string, any>) {
+    if (dc && dc.readyState === 'open') {
+      try { dc.send(JSON.stringify(obj)) } catch { /* */ }
+    }
+  }
+
   /** Force immediate settings write on device. */
   function save() {
     if (dc && dc.readyState === 'open') dc.send('{"save":1}')
@@ -433,5 +441,5 @@ export const useDeviceStore = defineStore('device', () => {
     dc = null
   })
 
-  return { settings, connected, synced, linkDown, get, set, sendJson, save, connect }
+  return { settings, connected, synced, linkDown, get, set, sendJson, sendCommand, save, connect }
 })
