@@ -179,6 +179,18 @@ one flag so the Dock's bottom-nav form, the single-window collapse, the
 full-screen settings drawer, and an app's master/detail→single-column fold all
 flip together at one breakpoint.
 
+### Top-bar icons (`lib/topbarIcons`)
+
+`lib/topbarIcons` is a small reactive registry (the sibling of the window-mount
+registry): `registerTopbarIcon({ id, component })`, read by the `TopbarIcons.vue`
+component. A buildable's `MainLayout` mounts `<TopbarIcons/>` once in its header,
+just left of the power/logout button; from then on, staging a straddle whose
+`register*` module calls `registerTopbarIcon()` surfaces its indicator there — no
+layout edit and no static import of a package that may not be staged. The shell
+only positions the icons; each registered component owns its own content (reads
+whatever device-store keys it needs) and collapses when it has nothing to show.
+Ordering is registration (= init) order, newest nearest the power button.
+
 ## What it does NOT own
 
 - Camera, video player, RTSP, recording UI — the consuming app's `browser/` tree.
