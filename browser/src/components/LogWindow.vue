@@ -24,7 +24,7 @@ import { ref, watch, onMounted, onUnmounted, nextTick, computed } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import FloatingWindow from './FloatingWindow.vue'
-import { getLogBuffer, subscribeLog } from '../stores/log'
+import { getLogBuffer, subscribeLog, logConnected } from '../stores/log'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
@@ -135,6 +135,13 @@ function showWindow() {
 watch(() => props.visible, (vis) => {
   if (vis) nextTick(showWindow)
   else destroyTerminal()
+})
+
+/* Quit when the log stream drops, matching the on-device Log app (which stops on
+ * ITS disconnect). Only on a true→false transition, so a window opened while the
+ * stream is still connecting keeps waiting rather than closing immediately. */
+watch(logConnected, (now, was) => {
+  if (was && !now && props.visible) emit('update:visible', false)
 })
 
 onMounted(() => { if (props.visible) nextTick(showWindow) })

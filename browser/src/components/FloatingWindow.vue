@@ -3,21 +3,21 @@
     v-show="shown"
     ref="windowRef"
     class="fw"
-    :class="{ 'fw--compact': compact }"
+    :class="{ 'fw--compact': compact, 'fw--autoheight': autoHeight && !compact }"
     :style="windowStyle"
     @mousedown="bringToFront"
   >
     <!-- Resize handles — suppressed in compact mode: the window is full-screen
          there and neither draggable nor resizable. -->
-    <template v-if="(canResizeV || canResizeH) && !compact">
-      <div v-if="canResizeV" class="fw-resize fw-resize-n" @pointerdown.prevent="startResize('n', $event)" />
-      <div v-if="canResizeV" class="fw-resize fw-resize-s" @pointerdown.prevent="startResize('s', $event)" />
+    <template v-if="(vResize || canResizeH) && !compact">
+      <div v-if="vResize" class="fw-resize fw-resize-n" @pointerdown.prevent="startResize('n', $event)" />
+      <div v-if="vResize" class="fw-resize fw-resize-s" @pointerdown.prevent="startResize('s', $event)" />
       <div v-if="canResizeH" class="fw-resize fw-resize-e" @pointerdown.prevent="startResize('e', $event)" />
       <div v-if="canResizeH" class="fw-resize fw-resize-w" @pointerdown.prevent="startResize('w', $event)" />
-      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-ne" @pointerdown.prevent="startResize('ne', $event)" />
-      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-nw" @pointerdown.prevent="startResize('nw', $event)" />
-      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-se" @pointerdown.prevent="startResize('se', $event)" />
-      <div v-if="canResizeV && canResizeH" class="fw-resize fw-resize-sw" @pointerdown.prevent="startResize('sw', $event)" />
+      <div v-if="vResize && canResizeH" class="fw-resize fw-resize-ne" @pointerdown.prevent="startResize('ne', $event)" />
+      <div v-if="vResize && canResizeH" class="fw-resize fw-resize-nw" @pointerdown.prevent="startResize('nw', $event)" />
+      <div v-if="vResize && canResizeH" class="fw-resize fw-resize-se" @pointerdown.prevent="startResize('se', $event)" />
+      <div v-if="vResize && canResizeH" class="fw-resize fw-resize-sw" @pointerdown.prevent="startResize('sw', $event)" />
     </template>
 
     <!-- Titlebar -->
@@ -62,6 +62,10 @@ const props = withDefaults(defineProps<{
   visible: boolean
   canResizeV?: boolean
   canResizeH?: boolean
+  /** Height follows the body's content instead of a fixed % (and vertical
+   *  resize is disabled). Width/position stay user-controllable. For panels
+   *  whose natural height is intrinsic (e.g. fixed-height stacked graphs). */
+  autoHeight?: boolean
   defaultGeom?: Geom
   minSize?: MinSize
   /** Monotonic "raise me" nonce. Bumping it brings the window to the front
@@ -74,6 +78,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   canResizeV: true,
   canResizeH: true,
+  autoHeight: false,
   defaultGeom: () => ({ x: 25, y: 25, w: 50, h: 50 }),
   minSize: () => ({ w: 10, h: 8 }),
   focusToken: 0,
@@ -100,6 +105,9 @@ const shown = computed(() =>
   props.visible && (!compact.value || focusedWindowId.value === props.id),
 )
 
+/* Vertical resize is meaningless when the height tracks content. */
+const vResize = computed(() => props.canResizeV && !props.autoHeight)
+
 /* ── z-order ── */
 const zIndex = ref(zCounter)
 function bringToFront() { zIndex.value = ++zCounter; setWindowZ(props.id, zIndex.value) }
@@ -117,6 +125,13 @@ const windowStyle = computed(() => {
    * window still paints above any sibling that's mid-transition. */
   if (compact.value) {
     return { left: '0%', top: '0%', width: '100%', height: '100%', zIndex: zIndex.value }
+  }
+  if (props.autoHeight) {
+    return {
+      left: `${pctX.value}%`, top: `${pctY.value}%`,
+      width: `${pctW.value}%`, height: 'auto', maxHeight: '92%',
+      zIndex: zIndex.value,
+    }
   }
   return {
     left: `${pctX.value}%`, top: `${pctY.value}%`,
@@ -495,6 +510,9 @@ watch(() => props.visible, (vis) => {
   border-bottom-left-radius: 5px;
   border-bottom-right-radius: 5px;
 }
+/* Content-height mode: basis auto (not the flex:1 basis:0 that collapses in an
+   auto-height column); scroll only if the body exceeds the window's max-height. */
+.fw--autoheight .fw-body { flex: 1 1 auto; overflow: auto; }
 
 /* Resize handles are invisible but generously sized so they're easy to
  * grab on touch and with a mouse. Each handle straddles the window border

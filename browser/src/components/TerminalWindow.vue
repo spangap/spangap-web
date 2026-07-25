@@ -4,6 +4,7 @@
     :id="configPrefix"
     :title="title"
     :visible="visible"
+    :focus-token="focusToken"
     :default-geom="defaultGeom"
     :min-size="{ w: 10, h: 8 }"
     @update:visible="onVisibleChange"
@@ -30,6 +31,10 @@ import '@xterm/xterm/css/xterm.css'
 const props = defineProps<{
   visible: boolean
   title: string
+  /** Monotonic "raise me" nonce — bumped when the dock icon is clicked. Beyond
+   *  raising the window (forwarded to FloatingWindow) it re-focuses the terminal
+   *  so a foregrounded CLI accepts typing immediately. */
+  focusToken?: number
   /** DataChannel label to open on the shared session (e.g. `cli:1`, `log:1`). */
   dcLabel: string
   /** DCEP protocol string — used by `log:1` to request a custom backlog size
@@ -186,13 +191,9 @@ function buildChannel(pc: RTCPeerConnection) {
   dc.binaryType = 'arraybuffer'
   dc.onopen = () => {
     atBottom = true
-    if (wasConnected) {
-      term?.writeln('\r\n\x1b[32m── reconnected ──\x1b[0m')
-    } else {
-      term?.clear()
-    }
+    term?.clear()
     wasConnected = true
-    flushPending()   // send any key pressed while the channel was down
+    flushPending()   // send any key pressed while the channel was opening
   }
   dc.onmessage = (ev) => {
     getSession().noteDcActivity()
@@ -209,19 +210,12 @@ function buildChannel(pc: RTCPeerConnection) {
   }
   dc.onclose = () => {
     dc = null
-    /* Device closed just this channel (e.g. the CLI exited on `exit`) while
-     * the session itself is still up: the DC is gone for good, so close the
-     * window. When the channel instead drops because the whole session is
-     * tearing down to reconnect, state has already left 'connected' by the
-     * time this queued onclose runs — keep the window so it reattaches its
-     * DC on the next peer connection. */
-    if (getSession().state === 'connected') {
-      emit('update:visible', false)
-      return
-    }
-    if (wasConnected) {
-      term?.writeln('\r\n\x1b[31m── channel closed ──\x1b[0m')
-    }
+    /* The channel is gone — the device closed just this DC (CLI `exit`) or the
+     * whole session dropped. Either way the terminal is dead; close the window,
+     * matching the on-device CLI app, which stops on ITS disconnect. Guarded on
+     * wasConnected so a still-connecting window survives a failed first attempt
+     * and reattaches its DC on the next peer connection. */
+    if (wasConnected) emit('update:visible', false)
   }
   dc.onerror = () => { /* onclose follows */ }
 }
@@ -259,6 +253,13 @@ function showWindow() {
 watch(() => props.visible, (vis) => {
   if (vis) nextTick(showWindow)
   else { detachSession(); destroyTerminal() }
+})
+
+/* Foregrounding an already-open window (dock icon → focus-token bump) must also
+ * hand keyboard focus to the terminal, not just raise it — otherwise the CLI is
+ * on top but swallows no keystrokes. A fresh open focuses via showWindow(). */
+watch(() => props.focusToken, () => {
+  if (props.visible && !props.readonly) nextTick(() => term?.focus())
 })
 
 onMounted(() => {

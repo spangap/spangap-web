@@ -1,12 +1,15 @@
 import { ref } from 'vue'
 import { useMenuStore } from '../stores/menu'
 import { registerApp } from '../lib/apps'
+import { registerWindowMount } from '../lib/windowMounts'
+import ActmonWindow from '../components/ActmonWindow.vue'
 
 /* ── Visibility ──
  * These start false; FloatingWindow restores its own saved visibility from
  * localStorage on mount and emits update:visible to reflect it. */
 export const cliVisible = ref(false)
 export const logVisible = ref(false)
+export const actmonVisible = ref(false)
 /* Settings is now a first-class app window (the gear dock icon), not a drawer. */
 export const settingsVisible = ref(false)
 
@@ -15,11 +18,13 @@ export const settingsVisible = ref(false)
  * MainLayout binds these to each window's `focus-token` prop. */
 export const cliFocus = ref(0)
 export const logFocus = ref(0)
+export const actmonFocus = ref(0)
 export const settingsFocus = ref(0)
 
 /* Dock launch actions: only ever show + raise, never hide. */
 export function showCli() { cliVisible.value = true; cliFocus.value++ }
 export function showLog() { logVisible.value = true; logFocus.value++ }
+export function showActmon() { actmonVisible.value = true; actmonFocus.value++ }
 export function showSettings() { settingsVisible.value = true; settingsFocus.value++ }
 
 /* ── Log backlog ──
@@ -63,6 +68,13 @@ export function registerAdvanced() {
                 placement: 2, isOpen: () => cliVisible.value })
   registerApp({ id: 'log', label: 'System Log', icon: 'log', open: showLog,
                 placement: 3, isOpen: () => logVisible.value })
+  registerApp({ id: 'actmon', label: 'Activity', icon: 'actmon', open: showActmon,
+                placement: 4, isOpen: () => actmonVisible.value })
+
+  /* Self-mount the Activity window (StraddleWindows renders it) so no buildable
+   * MainLayout needs to name it — unlike CLI/Log, which predate the registry. */
+  registerWindowMount({ id: 'actmon', title: 'Activity', component: ActmonWindow,
+                        visible: actmonVisible, focusToken: actmonFocus })
 
   /* #if 0 — Backlog Size / Edit / Developer Options removed from the menu.
    * The backing code (presets, editor, DeveloperPanel) is kept but no longer
