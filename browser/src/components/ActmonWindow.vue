@@ -5,21 +5,20 @@
     :visible="visible"
     :focus-token="focusToken"
     :default-geom="defaultGeom"
-    :min-size="{ w: 24, h: 8 }"
-    auto-height
+    :min-size="{ w: 24, h: 12 }"
     @update:visible="v => emit('update:visible', v)"
   >
     <template #default>
-      <div ref="bodyRef" class="actmon-body">
-        <div class="actmon-graph">
+      <div class="actmon-body">
+        <div class="actmon-graph actmon-graph-0">
           <canvas ref="c0Ref" class="actmon-canvas" />
           <div class="actmon-caption">core 0</div>
         </div>
-        <div class="actmon-graph">
+        <div class="actmon-graph actmon-graph-1">
           <canvas ref="c1Ref" class="actmon-canvas" />
           <div class="actmon-caption">core 1</div>
         </div>
-        <div class="actmon-graph">
+        <div class="actmon-graph actmon-graph-2">
           <canvas ref="c2Ref" class="actmon-canvas" />
           <div class="actmon-caption">power mgmt: <span class="c-red">CPU_MAX</span>, <span class="c-orange">APB_MAX</span>, <span class="c-yellow">APB_MIN</span>. Rest is SLEEP</div>
         </div>
@@ -44,14 +43,14 @@ const device = useDeviceStore()
 
 const isPhoneInit = window.matchMedia?.('(max-width: 599px)').matches ?? false
 const defaultGeom = isPhoneInit
-  ? { x: 0, y: 0, w: 100, h: 50 }
+  ? { x: 0, y: 0, w: 100, h: 60 }
   : { x: 20, y: 8, w: 55, h: 62 }
 
-/* Graph geometry. STEPS is the horizontal resolution — one column per second,
- * the window's full width divided into this many steps. GH is each graph's
- * pixel height (matches the on-device 50 px band). */
-const STEPS = 100
-const GH = 50
+/* Graph geometry. Each canvas backing store is a fixed STEPS×GH buffer — one
+ * column per sample, GH rows tall — and CSS stretches it to fill the window,
+ * so the drawing resolution is independent of the on-screen size. */
+const STEPS = 320
+const GH = 100
 
 /* Palette — identical to the on-device Activity app. */
 const C_BG = '#2A2A2A', C_GRID = '#606060', C_WHITE = '#FFFFFF'
@@ -63,22 +62,17 @@ interface Sample { core0: number; core1: number; sleep: number; apbMax: number; 
  * keep the last STEPS of them here (no ring transfer from the device). */
 let samples: Sample[] = []
 
-const bodyRef = ref<HTMLElement>()
 const c0Ref = ref<HTMLCanvasElement>()
 const c1Ref = ref<HTMLCanvasElement>()
 const c2Ref = ref<HTMLCanvasElement>()
 
 function ctxOf(cv: HTMLCanvasElement | undefined): { ctx: CanvasRenderingContext2D; w: number } | null {
   if (!cv) return null
-  const w = cv.clientWidth
-  if (w <= 0) return null
-  const dpr = window.devicePixelRatio || 1
-  cv.width = Math.max(1, Math.round(w * dpr))
-  cv.height = Math.round(GH * dpr)
+  if (cv.width !== STEPS) cv.width = STEPS
+  if (cv.height !== GH) cv.height = GH
   const ctx = cv.getContext('2d')
   if (!ctx) return null
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-  return { ctx, w }
+  return { ctx, w: STEPS }
 }
 
 function drawGrid(ctx: CanvasRenderingContext2D, w: number) {
@@ -151,17 +145,13 @@ function tick() {
 }
 
 let timer: ReturnType<typeof setInterval> | null = null
-let ro: ResizeObserver | null = null
 
 onMounted(() => {
   timer = setInterval(tick, 1000)
-  ro = new ResizeObserver(() => { if (props.visible) draw() })
-  if (bodyRef.value) ro.observe(bodyRef.value)
 })
 
 onUnmounted(() => {
   if (timer) { clearInterval(timer); timer = null }
-  if (ro) { ro.disconnect(); ro = null }
 })
 
 /* On open the canvases gain a size — redraw the buffer we've been keeping. */
@@ -170,20 +160,32 @@ watch(() => props.visible, v => { if (v) nextTick(draw) })
 
 <style scoped>
 .actmon-body {
+  position: relative;
   width: 100%;
+  height: 100%;
   background: #1a1a1a;
-  padding: 10px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
 }
-.actmon-graph { width: 100%; }
+/* Three bands, each 25% of the window tall, anchored at 0 / 33% / 66% from the
+ * top. Height tracks the window since the parent fills it. */
+.actmon-graph {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 25%;
+}
+.actmon-graph-0 { top: 0; }
+.actmon-graph-1 { top: 33%; }
+.actmon-graph-2 { top: 66%; }
 .actmon-canvas {
   display: block;
   width: 100%;
-  height: 50px;
+  height: 100%;
+  image-rendering: pixelated;
 }
 .actmon-caption {
+  position: absolute;
+  top: 100%;
+  left: 0;
   padding: 2px 0 0 6px;
   font: 11px/1.2 'SF Mono', 'Menlo', 'Consolas', monospace;
   color: #c8c8c8;
