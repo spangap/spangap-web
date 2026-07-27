@@ -20,8 +20,10 @@
       <div v-if="vResize && canResizeH" class="fw-resize fw-resize-sw" @pointerdown.prevent="startResize('sw', $event)" />
     </template>
 
-    <!-- Titlebar -->
+    <!-- Titlebar — suppressed in chromeless mode; the close control moves into
+         the body as a floating dot and the window is pinned always-on-top. -->
     <div
+      v-if="!chromeless"
       class="fw-titlebar"
       :class="{ 'fw-titlebar-flash': flashing }"
       @pointerdown.prevent="startDrag($event)"
@@ -34,7 +36,13 @@
     </div>
 
     <!-- Body -->
-    <div ref="bodyRef" class="fw-body">
+    <div
+      ref="bodyRef"
+      class="fw-body"
+      :class="{ 'fw-body--chromeless': chromeless, 'fw-body--flush': flush }"
+      @pointerdown="onBodyPointerDown"
+    >
+      <div v-if="chromeless" class="fw-close fw-close-float" @pointerdown.stop @click="close" />
       <slot :size="bodySize" />
     </div>
   </div>
@@ -43,6 +51,9 @@
 <script lang="ts">
 /* Shared z-counter across all FloatingWindow instances */
 let zCounter = 1000
+/* Chromeless windows are pinned above every normal window. They still stack
+ * among themselves off this same counter, just lifted into a reserved band. */
+const ON_TOP_Z = 2_000_000
 </script>
 
 <script setup lang="ts">
@@ -75,6 +86,13 @@ const props = withDefaults(defineProps<{
   /** Optional body aspect ratio (width / height). When > 0, resizing keeps the
    *  body proportional to it (e.g. a device screen mirror). 0 = free resize. */
   aspect?: number
+  /** Strip the titlebar: the close control becomes a floating dot in the
+   *  top-left of the body and the window is pinned above all normal windows.
+   *  For panels that collapse to a chromeless tile when space is tight. */
+  chromeless?: boolean
+  /** Remove the body's inner padding so content sits edge-to-edge. For panels
+   *  that manage their own insets (e.g. full-bleed graphs). */
+  flush?: boolean
 }>(), {
   canResizeV: true,
   canResizeH: true,
@@ -83,6 +101,8 @@ const props = withDefaults(defineProps<{
   minSize: () => ({ w: 10, h: 8 }),
   focusToken: 0,
   aspect: 0,
+  chromeless: false,
+  flush: false,
 })
 
 const emit = defineEmits<{
@@ -110,7 +130,14 @@ const vResize = computed(() => props.canResizeV && !props.autoHeight)
 
 /* ── z-order ── */
 const zIndex = ref(zCounter)
-function bringToFront() { zIndex.value = ++zCounter; setWindowZ(props.id, zIndex.value) }
+function bringToFront() {
+  const base = props.chromeless ? ON_TOP_Z : 0
+  zIndex.value = base + ++zCounter
+  setWindowZ(props.id, zIndex.value)
+}
+/* Re-assert the pin whenever chromeless flips (into the on-top band on
+ * collapse, back down to a normal raise on expand). */
+watch(() => props.chromeless, () => bringToFront())
 
 /* ── geometry ──
  * Windows are pure floating (desktop) / full-screen (phone). Docking was
@@ -299,6 +326,15 @@ function endDrag(e: PointerEvent) {
   saveState()
 }
 
+/* Chromeless has no titlebar, so the body itself is the drag handle — a press
+ * anywhere on it moves the window, except where a child claims the pointer
+ * (the close dot, or interactive slot content that stops propagation). */
+function onBodyPointerDown(e: PointerEvent) {
+  if (!props.chromeless) return
+  e.preventDefault()
+  startDrag(e)
+}
+
 /* ── resize ── */
 type Edge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
 let resizeEdge: Edge = 's'
@@ -330,17 +366,27 @@ function onResize(e: PointerEvent) {
   const dx = (e.clientX - resizeStartX) / cw * 100
   const dy = (e.clientY - resizeStartY) / ch * 100
 
-  if (resizeEdge.includes('e')) pctW.value = Math.max(props.minSize.w, resizeStartW + dx)
-  if (resizeEdge.includes('w')) {
-    const nw = Math.max(props.minSize.w, resizeStartW - dx)
-    pctX.value = resizeStartPX + resizeStartW - nw
-    pctW.value = nw
+  /* Each edge anchors the opposite edge and clamps the moving edge to the
+   * container. When the moving edge hits the boundary the window stops growing
+   * — it does NOT push the anchored edge past where the drag started. */
+  const minW = props.minSize.w, minH = props.minSize.h
+  if (resizeEdge.includes('e')) {                     /* left anchored, right → pointer */
+    pctW.value = Math.min(100 - resizeStartPX, Math.max(minW, resizeStartW + dx))
   }
-  if (resizeEdge.includes('s')) pctH.value = Math.max(props.minSize.h, resizeStartH + dy)
-  if (resizeEdge.includes('n')) {
-    const nh = Math.max(props.minSize.h, resizeStartH - dy)
-    pctY.value = resizeStartPY + resizeStartH - nh
-    pctH.value = nh
+  if (resizeEdge.includes('w')) {                     /* right anchored, left → pointer */
+    const right = resizeStartPX + resizeStartW
+    const x = Math.max(0, Math.min(right - minW, resizeStartPX + dx))
+    pctX.value = x
+    pctW.value = right - x
+  }
+  if (resizeEdge.includes('s')) {                     /* top anchored, bottom → pointer */
+    pctH.value = Math.min(100 - resizeStartPY, Math.max(minH, resizeStartH + dy))
+  }
+  if (resizeEdge.includes('n')) {                     /* bottom anchored, top → pointer */
+    const bottom = resizeStartPY + resizeStartH
+    const y = Math.max(0, Math.min(bottom - minH, resizeStartPY + dy))
+    pctY.value = y
+    pctH.value = bottom - y
   }
   /* Aspect lock: a horizontal-edge drag drives width→height, a vertical-edge
    * drag drives height→width, so the mirror stays proportional either way. */
@@ -497,6 +543,21 @@ watch(() => props.visible, (vis) => {
 }
 .fw-close:hover { background: #ff3b30; }
 
+/* Chromeless: the close dot floats over the top-left of the body (the first
+ * graph). A subtle ring keeps it legible against any graph colour. Shown only
+ * while the window is hovered, so nothing overlays the content otherwise. */
+.fw-close-float {
+  position: absolute; top: 6px; left: 6px; z-index: 12;
+  box-shadow: 0 0 0 1px rgba(0,0,0,0.6);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  pointer-events: none;
+}
+.fw:hover .fw-close-float {
+  opacity: 1;
+  pointer-events: auto;
+}
+
 .fw-title {
   flex: 1; text-align: center; font-size: 12px; font-weight: 500;
   color: rgba(255,255,255,0.7); font-family: system-ui;
@@ -510,9 +571,24 @@ watch(() => props.visible, (vis) => {
   border-bottom-left-radius: 5px;
   border-bottom-right-radius: 5px;
 }
+/* With no titlebar the body is the whole window — round its top corners too,
+ * drop the padding so content goes edge-to-edge, and make it the drag surface
+ * (grab cursor; touch drags move, not scroll). */
+.fw-body--chromeless {
+  position: relative;
+  padding: 0;
+  border-top-left-radius: 5px;
+  border-top-right-radius: 5px;
+  cursor: grab;
+  touch-action: none;
+}
+.fw-body--chromeless:active { cursor: grabbing; }
 /* Content-height mode: basis auto (not the flex:1 basis:0 that collapses in an
    auto-height column); scroll only if the body exceeds the window's max-height. */
 .fw--autoheight .fw-body { flex: 1 1 auto; overflow: auto; }
+
+/* Edge-to-edge body: panel manages its own insets. */
+.fw-body--flush { padding: 0; }
 
 /* Resize handles are invisible but generously sized so they're easy to
  * grab on touch and with a mouse. Each handle straddles the window border

@@ -1153,7 +1153,7 @@ static void webrtcTaskFn(void*) {
       reg.itsPort = WEBRTC_PORT;
       safeStrncpy(reg.path, "webrtc", sizeof(reg.path));
       while (!itsSendAux("web", WEB_PATH_REG_PORT, &reg, sizeof(reg), pdMS_TO_TICKS(500)))
-          vTaskDelay(pdMS_TO_TICKS(100));
+          delay(100);
     }
 
     storageSubscribeChanges("s.net.webrtc_port", ON_CHANGE {
@@ -1320,6 +1320,11 @@ static void webrtcTaskFn(void*) {
         /* Inactivity: peer gone without clean close. */
         if (sctp.established && lastUdpRxMs && millis() - lastUdpRxMs > UDP_TIMEOUT_MS) {
             info("no UDP activity for %us, tearing down\n", (unsigned)(UDP_TIMEOUT_MS / 1000));
+            /* The browser's Activity monitor raises sys.stats.web_actmon while
+             * open; a crashed/vanished tab can't lower it, so the device clears
+             * it here when the peer times out — otherwise the 1 Hz stats publish
+             * would run forever for a viewer that's gone. */
+            storageSet("sys.stats.web_actmon", 0);
             dcMapClearAll();
             dtlsSessionFree();
             dtlsSessionInit();

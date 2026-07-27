@@ -11,6 +11,7 @@
 #include "storage.h"
 #include "log.h"
 #include "cli.h"
+#include "pm.h"
 #include "its.h"
 #include "net.h"
 #include "compat.h"
@@ -698,7 +699,7 @@ void webRegisterHandler(const char* path, web_url_handler_t cb) {
     msg.cb = cb;
     safeStrncpy(msg.path, path, sizeof(msg.path));
     while (!itsSendAux("web", WEB_PATH_HANDLER_PORT, &msg, sizeof(msg), pdMS_TO_TICKS(500)))
-        vTaskDelay(pdMS_TO_TICKS(100));
+        delay(100);
 }
 
 /* ---- ITS server callbacks ---- */
@@ -1801,7 +1802,7 @@ static void webTaskFn(void* arg) {
       reg.defaultPort = 80;
       reg.keepAlive = 1;
       while (!itsSendAux("net", NET_PORT_REG_PORT, &reg, sizeof(reg), pdMS_TO_TICKS(500)))
-          vTaskDelay(pdMS_TO_TICKS(100));
+          delay(100);
     }
     { net_port_msg_t reg = {};
       reg.itsPort = WEB_HTTPS_PORT;
@@ -1810,7 +1811,7 @@ static void webTaskFn(void* arg) {
       reg.tls = 1;
       reg.keepAlive = 1;
       while (!itsSendAux("net", NET_PORT_REG_PORT, &reg, sizeof(reg), pdMS_TO_TICKS(500)))
-          vTaskDelay(pdMS_TO_TICKS(100));
+          delay(100);
     }
 
     info("ready (%d maps, %d mime types)\n", webMapCount, webMimeCount);
@@ -2001,6 +2002,7 @@ void webMapAddIfAbsent(const char* url, const char* files,
 #define WEB_VERSION 1
 
 void webInit() {
+    pmStatsRequest();   /* -web renders the CPU/PM activity graphs → needs the ring */
     int v = storageGetInt("s.web.version", 0);
     if (v < WEB_VERSION) {
         storageDefaultTree("s.web", R"({
