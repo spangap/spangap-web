@@ -230,7 +230,7 @@ function drawState(cv: HTMLCanvasElement | undefined) {
   }
 }
 
-/* out (blue) over in (yellow), green overlap; auto-scaled to the window peak. */
+/* in (blue) over out (yellow), green overlap; auto-scaled to the window peak. */
 function drawTraffic(cv: HTMLCanvasElement | undefined, peak: typeof trafPeak,
                      pickOut: (s: NetSample) => number, pickIn: (s: NetSample) => number,
                      fmt: (v: number) => string) {
@@ -253,7 +253,7 @@ function drawTraffic(cv: HTMLCanvasElement | undefined, peak: typeof trafPeak,
     const x = (STEPS - n + i) * step, bw = Math.ceil(step)
     const lo = Math.min(out, inn), hi = Math.max(out, inn)
     if (lo > 0) { ctx.fillStyle = C_MIX; ctx.fillRect(x, GH - lo, bw, lo) }
-    if (hi > lo) { ctx.fillStyle = out >= inn ? C_BLUE : C_IN; ctx.fillRect(x, GH - hi, bw, hi - lo) }
+    if (hi > lo) { ctx.fillStyle = out >= inn ? C_YELLOW : C_BLUE; ctx.fillRect(x, GH - hi, bw, hi - lo) }
   }
   const frac = peakIdx >= 0 ? (STEPS - n + peakIdx) / STEPS : 1
   peak.value = { show: true, text: fmt(peakVal), frac }
@@ -469,8 +469,8 @@ watch(inactive, (now, was) => { if (was && !now) refetchHistory() })
 .actmon-caption .c-red { color: #E05050; }
 .actmon-caption .c-orange { color: #F08820; }
 .actmon-caption .c-yellow { color: #E8D040; }
-.actmon-caption .c-in { color: #E8D040; }
-.actmon-caption .c-out { color: #4088E8; }
+.actmon-caption .c-in { color: #4088E8; }
+.actmon-caption .c-out { color: #E8D040; }
 
 /* Estimate pill — bottom-left over its own graph; draggable to pick the window. */
 .actmon-est {
