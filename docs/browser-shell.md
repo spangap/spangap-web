@@ -159,6 +159,17 @@ visibility persist in `localStorage` under `spangap.win.<id>`. It is pointer-eve
 driven (`touch-action: none` so phones don't hijack the gesture as scroll) and
 gives phones a sensible first-run layout via an optional `defaultDock` prop.
 
+**Click-to-focus is click-to-focus only.** A click anywhere in a background
+(non-front-most) window raises and focuses it, and that click is swallowed — it
+does not also actuate whatever sits under the pointer, so a stray click on a
+buried window can't fire a button, follow a link, or trigger a row action. The
+`mousedown` is left to propagate, so an input or terminal under the pointer still
+takes keyboard focus and accepts typing immediately. Two cases pass through
+untouched: a pointer that moved more than a few pixels between press and release,
+and a release with a non-collapsed text selection — both are drags, not clicks.
+Once a window is front-most, its content behaves normally; only the raising click
+is ever swallowed. Window content therefore needs no guard of its own.
+
 ### The window manager (`lib/windows`)
 
 `lib/windows` is a small reactive registry — not a Pinia store — that mirrors the

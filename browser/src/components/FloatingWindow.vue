@@ -5,7 +5,8 @@
     class="fw"
     :class="{ 'fw--compact': compact, 'fw--autoheight': autoHeight && !compact }"
     :style="windowStyle"
-    @mousedown="bringToFront"
+    @mousedown.capture="onRootMouseDown"
+    @click.capture="onRootClickCapture"
   >
     <!-- Resize handles — suppressed in compact mode: the window is full-screen
          there and neither draggable nor resizable. -->
@@ -138,6 +139,36 @@ function bringToFront() {
 /* Re-assert the pin whenever chromeless flips (into the on-top band on
  * collapse, back down to a normal raise on expand). */
 watch(() => props.chromeless, () => bringToFront())
+
+/* ── click-to-focus swallowing ──
+ * A plain click on a background (non-front) window only raises and focuses it —
+ * the click is swallowed so it does NOT also actuate the content under the
+ * pointer (a button, a link, a message action). The window still takes keyboard
+ * focus: the mousedown is left to reach the terminal / input beneath, which
+ * focuses it, so the CLI accepts typing immediately. A drag that selects text is
+ * not a click — if the pointer moved or a text selection is present, the
+ * interaction passes through untouched. Only the raising click (window not
+ * front-most at press time) is ever swallowed; interacting with the already-
+ * focused window behaves normally. */
+const CLICK_SLOP = 4
+let raiseArmed = false
+let downX = 0, downY = 0
+function onRootMouseDown(e: MouseEvent) {
+  raiseArmed = focusedWindowId.value !== props.id
+  downX = e.clientX
+  downY = e.clientY
+  bringToFront()
+}
+function onRootClickCapture(e: MouseEvent) {
+  if (!raiseArmed) return
+  raiseArmed = false
+  const moved = Math.abs(e.clientX - downX) > CLICK_SLOP ||
+                Math.abs(e.clientY - downY) > CLICK_SLOP
+  const sel = window.getSelection()
+  if (moved || (sel && !sel.isCollapsed)) return   /* a select/drag — leave it */
+  e.stopPropagation()
+  e.preventDefault()
+}
 
 /* ── geometry ──
  * Windows are pure floating (desktop) / full-screen (phone). Docking was
