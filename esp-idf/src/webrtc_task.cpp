@@ -12,6 +12,7 @@
  * See docs/webrtc-for-everything.md.
  */
 #include "webrtc_task.h"
+#include "spangap.h"
 #include "mem.h"
 #include "webrtc_sctp.h"
 #include "storage.h"
@@ -1352,6 +1353,14 @@ static void webrtcTaskFn(void*) {
 /* ---- Init ---- */
 
 void webrtcInit() {
+    /* Safe mode's reachable surface is one page and one mode-gated endpoint.
+     * WebRTC would widen it back out — the storage DataChannel is a config
+     * write path into a store that is about to be replaced or erased — and the
+     * page it exists to serve, the SPA, is not what safe mode serves. */
+    if (spangapSafeMode() != SAFE_MODE_NONE) {
+        info("webrtc: not started in safe mode\n");
+        return;
+    }
     for (int i = 0; i < DC_MAX_CHANNELS; i++) dcMap[i].handle = -1;
     /* No PM locks here: webrtc-task is pure DC↔ITS plumbing and the data path is
      * tickless-safe (DTLS/SCTP/ICE timers wake the CPU on schedule, WiFi rides

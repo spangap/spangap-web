@@ -58,14 +58,29 @@ order:
    HTTP request to a `WEB_PATH_FORWARD` entry injects the whole buffer back and
    `itsServerForward`s to the owner; a `WEB_PATH_HANDLER` entry invokes the
    callback inline then drains the body and keeps the slot for keep-alive.
-3. **File mapping** (`findMapping`, longest URL prefix): resolve auth, reject
+3. **Safe-mode short-circuit** — on a
+   [safe-mode](../../spangap-core/docs/safe-mode.md) boot, everything that got
+   this far resolves to the recovery page (`serveSafeMode` → `safeModePage`) and
+   returns. It sits *ahead* of `findMapping` deliberately: the mapping table is
+   empty in that mode anyway, and short-circuiting here means no path — not `/`,
+   not `/state/…`, not a WebDAV `PROPFIND` — can reach a file. The `/backup`
+   endpoint and `/auth` were matched in step 2.
+
+   The one exception is `SAFE_MODE_ENDPOINT` itself: a path under it that step 2
+   did **not** claim gets a `404`, never the page. Serving the page there is a
+   trap — the backup page navigates to the download on load, so a page served at
+   the download URL re-navigates to itself for ever, and the tab spins with
+   nothing to show for it.
+4. **File mapping** (`findMapping`, longest URL prefix): resolve auth, reject
    path traversal / hidden components, dispatch WebDAV verbs on `dav` mappings,
    then serve `GET`/`HEAD` via the file worker (SPA) or the synchronous path
    (directory-index mappings).
 
 Auth is resolved by `resolveAuth` (cookie → `authCheck` → realm) and enforced in
-step 3: a request to an auth-required mapping whose realm isn't in the list (and
-isn't loopback) is sent to `serveRootIndex` (the login SPA), not `401`.
+step 4: a request to an auth-required mapping whose realm isn't in the list (and
+isn't loopback) is sent to `serveRootIndex` (the login SPA), not `401`. Step 3
+resolves auth the same way but has its own fallback — a sign-in form on the
+recovery page, since the SPA is exactly what safe mode does not serve.
 
 ## 4. The loopback exemption (two places)
 
@@ -137,6 +152,14 @@ from the original design is intentionally dropped — the deleted cookie fails
 - **Inject the whole receive buffer on forward, not just the consumed headers.**
   A POST body that arrived in the same TCP segment as the headers sits past the
   `\r\n\r\n` boundary; forwarding only `consumed` bytes silently drops it.
+- **Anything that registers a URL prefix must start from inside `webTaskFn`,
+  after the `itsOnAux` calls.** A registration is an aux message, and ITS drops
+  an aux whose port has no handler yet — while `itsSendAux` still reports it
+  delivered, so the sender's retry loop exits satisfied and the prefix is simply
+  never registered. `authWebInit()` and `safeModeInit()` are both called there
+  for this reason; a straddle registering from its own task is safe only because
+  it comes up a whole band later. The failure is silent and permanent: requests
+  fall through to whatever the routing order has after the registered-path step.
 - **`web_file` stack is 8 KB, not 5.** The worker runs extension transforms (e.g.
   the viewer's MD4C Markdown→HTML) and gzip inflate inline; MD4C wants the
   headroom even though the decompressor state and large buffers are on the heap.

@@ -16,7 +16,9 @@ maintainer reference under [`docs/`](docs/):
 | **browser-shell** — the SPA shell: the Dock app launcher, `registerApp`, the menu store, `GeneratedPanel`, the WebRTC session, config sync, and auth flow | [docs/browser-shell.md](docs/browser-shell.md) | [docs/browser-shell-internals.md](docs/browser-shell-internals.md) |
 
 The firmware half lives in [`esp-idf/`](esp-idf/) (`web.cpp`, `auth_web.cpp`,
-`webrtc_task.cpp`, `webrtc_sctp.cpp`). The browser half is the npm package
+`webrtc_task.cpp`, `webrtc_sctp.cpp`, `safe_mode.cpp` — the recovery boot's page
+and backup/restore endpoint, described in
+[spangap-core docs/safe-mode.md](../spangap-core/docs/safe-mode.md)). The browser half is the npm package
 `spangap-browser` in [`browser/`](browser/), which keeps its own
 [README](browser/README.md) and [INTERNALS](browser/INTERNALS.md) as the
 package-author's guide.

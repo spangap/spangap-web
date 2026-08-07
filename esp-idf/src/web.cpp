@@ -6,6 +6,7 @@
  * Runs on core 1.
  */
 #include "web.h"
+#include "spangap.h"
 #include "mem.h"
 #include "auth.h"
 #include "storage.h"
@@ -31,6 +32,8 @@
 #include "cJSON.h"
 #include "miniz.h"        /* ESP32-S3 ROM DEFLATE (tinfl_*) — zero added flash */
 #include "lwip/ip_addr.h" /* ip_addr_isloopback — loopback request exemptions */
+
+#include "safe_mode.h"   /* the recovery boot's page + its one gated endpoint */
 
 #define WEB_KEEPALIVE_MS   5000
 #define WEB_ITS_TO_SIZE    4096   /* client→web (HTTP requests from browser) */
@@ -80,7 +83,16 @@ static int httpAllowedCount = 0;
 
 static void loadMappings() {
     webMapCount = 0;
-    int n = storageArrayCount("s.web.map");
+    /* Safe mode serves one page and one gated endpoint, and nothing else. Not
+     * loading the table is what makes that true: /state, /fixed and /sdcard are
+     * unreachable over HTTP and WebDAV for the whole window, and routing
+     * short-circuits ahead of findMapping anyway. (Skipping the SEEDING in
+     * webInit would buy nothing — it only ever writes on a first boot, and the
+     * entries live in s.web.map and outlast it.) The HTTPS policy below still
+     * loads: an archive carries every secret the device holds, so the redirect
+     * matters more here than anywhere. */
+    int n = spangapSafeMode() == SAFE_MODE_NONE
+                ? storageArrayCount("s.web.map") : 0;
     for (int i = 0; i < n && i < WEB_MAX_MAPS; i++) {
         char key[48], url[32], files[64];
         snprintf(key, sizeof(key), "s.web.map.%d.url", i);
@@ -1145,6 +1157,37 @@ static void serveDirIndex(int h, const std::string& urlDir, const char* fsDir) {
     wh.state = HS_SEND_HDR;
 }
 
+/* Serve the compiled-in safe-mode page (safe_mode.cpp builds it; the buffer is
+ * ours to free, and the send machinery does that from genBuf). Not a file in
+ * /fixed: a recovery mode that depends on the webroot being intact has a hole
+ * in it, and a broken webroot is one of the states you enter safe mode to
+ * repair. */
+static void serveSafeMode(int h, bool authed) {
+    auto& wh = handles[h];
+    size_t genLen = 0;
+    char* html = safeModePage(authed, &genLen);
+    if (!html) {
+        wh.hdrLen = snprintf(wh.hdr, sizeof(wh.hdr),
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n"
+            "Connection: close\r\n\r\n");
+        injectAuthHeader(wh);
+        wh.hdrSent = 0;
+        wh.state = HS_SEND_HDR;
+        return;
+    }
+    wh.genBuf = (uint8_t*)html;
+    wh.genLen = genLen;
+    wh.bodyRemain = genLen;
+    wh.hdrLen = snprintf(wh.hdr, sizeof(wh.hdr),
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+        "Cache-Control: no-store\r\nContent-Length: %u\r\n"
+        "Connection: keep-alive\r\n\r\n", (unsigned)genLen);
+    injectAuthHeader(wh);
+    wh.hdrSent = 0;
+    wh.wLen = wh.wSent = 0;
+    wh.state = HS_SEND_HDR;
+}
+
 static void serve404(int h) {
     auto& wh = handles[h];
     wh.hdrLen = snprintf(wh.hdr, sizeof(wh.hdr),
@@ -1463,6 +1506,34 @@ static void tryParseRequest(int h) {
         return;
     }
 
+    /* ---- Safe mode: the operation's own page, and nothing else ---- */
+    /* Ahead of findMapping, so every stray path — /, /state/…, a WebDAV
+     * PROPFIND — resolves here instead of to a file. The one gated endpoint is
+     * a registered path and was matched above; so was /auth, which is how a
+     * browser without a session cookie gets one. */
+    if (spangapSafeMode() != SAFE_MODE_NONE) {
+        /* Everything EXCEPT the endpoint's own prefix. Serving the page under
+         * `/backup/…` would be a trap: the mode's page navigates to the
+         * download on load, so a page served there re-navigates to itself, for
+         * ever. If the endpoint did not claim this path it does not exist, and
+         * saying so is the only honest answer. */
+        if (strncmp(path.c_str(), SAFE_MODE_ENDPOINT, sizeof(SAFE_MODE_ENDPOINT) - 1) == 0) {
+            consumeRequest(wh, consumed);
+            serve404(h);
+            return;
+        }
+        resolveAuth(wh, wh.rbuf, consumed);
+        /* Falls open when no password is set — which is exactly the fresh or
+         * broken-store case that must stay reachable, and the surface it opens
+         * is one page plus an endpoint that only exists in the mode the
+         * operator explicitly asked for. */
+        bool authed = !authEnabled() || realmInList(wh.authRealm, "admin") ||
+                      ip_addr_isloopback(&wh.clientAddr);
+        consumeRequest(wh, consumed);
+        serveSafeMode(h, authed);
+        return;
+    }
+
     /* ---- File serving + WebDAV via configurable mappings ---- */
     web_map_t* map = findMapping(path);
     if (!map) { consumeRequest(wh, consumed); serve404(h); return; }
@@ -1764,6 +1835,16 @@ static void webTaskFn(void* arg) {
      * brought up by spangapInit(). authWebInit just wires the HTTP face. */
     authWebInit();
 
+    /* Safe mode's endpoint, likewise on THIS side of the itsOnAux calls above.
+     * Anything that registers a URL prefix does so by sending us an aux, and an
+     * aux that arrives before its port has a handler is DROPPED — silently from
+     * the sender's point of view, since itsSendAux only reports that the inbox
+     * took it. Starting the safe-mode server from webInit() raced exactly that
+     * window and lost the /backup registration, whereupon every request fell
+     * through to the page and the download page re-navigated to itself forever.
+     * No-op outside a safe-mode boot. */
+    safeModeInit();
+
     storageSubscribeChanges("s.web.", ON_CHANGE {
         loadMappings();
         loadMimeTypes();
@@ -2051,7 +2132,13 @@ void webInit() {
      * decompressor state and large buffers are on the heap, but MD4C parsing
      * wants a few KB of stack headroom over plain file streaming. */
     spawnTask(webFileWorkerFn, "web_file", 8192, nullptr, 1, 1, STACK_DRAM);
-    webHandle = spawnTask(webTaskFn, "web", 8192, nullptr, 1, 1);
+    /* Safe mode serves its backup/restore endpoint as an in-task handler, so
+     * the archive walk — eight levels of recursion with std::string paths,
+     * tdefl_compress and the tar writer under it — runs on THIS stack rather
+     * than a worker's. 8 KB does not cover that. PSRAM stack, and the mode
+     * lasts one boot, so the headroom costs nothing that matters. */
+    size_t webStack = spangapSafeMode() == SAFE_MODE_NONE ? 8192 : 20480;
+    webHandle = spawnTask(webTaskFn, "web", webStack, nullptr, 1, 1);
 }
 
 /* ---- WebSocket convenience functions (for tasks with forwarded WS connections) ---- */

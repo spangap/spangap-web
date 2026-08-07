@@ -15,7 +15,7 @@ browser/
 └── src/
     ├── index.ts            re-exports lib/* + stores/{device,log,menu}
     ├── lib/                apps, generatedPanels, auth, device-url, reconnect,
-    │                       viewport, windows, webrtc-session
+    │                       viewport, windows, webrtc-session, safeMode
     ├── components/         SettingToggle/Slider/Select/Text, PanelHeading,
     │                       GeneratedPanel, GeneratedListRow, Dock, SettingsWindow,
     │                       SettingsNavTree, FloatingWindow, LogWindow,

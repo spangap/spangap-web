@@ -38,13 +38,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
 import { useMenuStore } from '../stores/menu'
 import { useCompact } from '../lib/viewport'
 import FloatingWindow from './FloatingWindow.vue'
 import SettingsNavTree from './SettingsNavTree.vue'
 
-defineProps<{ visible: boolean; focusToken?: number }>()
+const props = defineProps<{ visible: boolean; focusToken?: number }>()
 const emit = defineEmits<{ 'update:visible': [value: boolean] }>()
 
 const menu = useMenuStore()
@@ -58,6 +58,20 @@ const rootItems = computed(() => {
 
 const activePanel = computed(() => menu.activePanel)
 const activeComponent = computed(() => menu.activePanelComponent)
+
+/* Opening Settings lands on the first pane rather than on "Select a setting"
+ * — the two-pane window has room for both, so an empty right half is a step
+ * the operator has to take before anything is on screen. It is the first pane
+ * by placement, not a hard-coded id, so a build without System still lands
+ * somewhere. Phone is untouched: there the nav IS the window until a leaf is
+ * picked, and pre-picking one would hide the list behind a back link. */
+function defaultPanel() {
+  if (!props.visible || compact.value || menu.activePanel) return
+  const first = rootItems.value.find(i => i.type === 'panel')
+  if (first) menu.openPanel(first.id)
+}
+
+watch(() => [props.visible, rootItems.value.length], defaultPanel, { immediate: true })
 
 function select(id: string) { menu.openPanel(id) }
 function back() { menu.closePanel() }

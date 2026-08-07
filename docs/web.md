@@ -140,6 +140,38 @@ also bypass the realm check entirely (they carry no session cookie), so the
 on-device viewer can read protected pages. Only the device itself can originate a
 loopback request, so this grants nothing to the network.
 
+## Safe mode: one page and one endpoint
+
+On a [safe-mode](../../spangap-core/docs/safe-mode.md) boot — the recovery boot
+that backs the state store up, restores one, or factory-resets the device — web
+comes up normally with real credentials, a real hostname and a real certificate,
+and then serves almost nothing:
+
+- The mapping table is **not loaded**. `webMapCount` is zero, so `/state`,
+  `/fixed` and `/sdcard` are unreachable over both HTTP and WebDAV for the whole
+  window. (The seeding in `webInit` still runs; it only ever writes on a first
+  boot, and the entries live in `s.web.map` and outlast it — skipping it would
+  buy nothing. Not *loading* is what closes the door.)
+- Routing short-circuits **ahead of `findMapping`**: every path that is not a
+  registered prefix resolves to the operation's own compiled-in page. Not a file
+  under `/fixed` — a recovery mode that depends on the webroot being intact has
+  a hole in it.
+- One endpoint exists, `/backup`, and only in the mode that needs it: `GET` for
+  a backup, `POST`/`PUT` for a restore, `GET /backup/cancel` for a restore the
+  operator backed out of before choosing to commit, `404` for the rest. So the window in
+  which an unattended device will hand out an archive containing every secret it
+  holds exists only when an operator explicitly asked for a backup.
+- `/auth` still resolves, so a browser without a session cookie can get one from
+  the page's sign-in form.
+- **webrtc does not start.** Its storage DataChannel is a config write path into
+  a store that is about to be replaced, and the SPA it exists to serve is not
+  what safe mode serves.
+
+Auth is the ordinary cookie check: the `admin` realm when `authEnabled()`,
+falling open when no password is set — which is exactly the fresh-or-broken-store
+case that has to stay reachable, and the surface it opens is one page plus a
+mode-gated endpoint. The whole face lives in `safe_mode.cpp`.
+
 ## Storage surface
 
 Settings live under `s.web.*`. The web server also seeds two net-owned mDNS

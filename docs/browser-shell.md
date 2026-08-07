@@ -92,6 +92,37 @@ config-bound controls — `SettingToggle`, `SettingSlider`, `SettingSelect`,
 subscription, optimistic update, and rollback. The shell's own default panels are
 About, System, and Developer.
 
+The System panel carries the **Backup & Recovery** actions — back up, restore,
+factory reset. Each one is an ordinary storage write (`s.sys.backup`,
+`s.sys.restore`, `s.sys.factory_reset`), which the firmware turns into a reboot
+into [safe mode](../../spangap-core/docs/safe-mode.md); `lib/safeMode` then covers
+the page while the device is away, and **reloads** once it answers again. That
+reload is required, not cosmetic: without it the browser sits on the stale app
+shell and never sees the safe-mode page the device is now serving. All three ask
+first, because all three take the device away for a reboot; restore and factory
+reset say additionally that there is no undo, and the factory-reset dialog offers
+a target only when `sys.sd.present` says there is a card to choose between.
+
+The cover `safeMode` puts up comes in two shapes, split on whether there is
+anything left to say. A backup or restore reboot is a **wait the operator just
+asked for** — black screen, spinner, no words, because a paragraph saying the
+device is rebooting only repeats the dialog they pressed OK on. The card with
+text is for the covers that carry something they do not already know: a factory
+reset, which comes back on its own access point and will not be at this address,
+and a write that never left because the config channel was down.
+
+The Settings window opens on its first pane (System) rather than on an empty
+"select a setting" pane — on the two-pane desktop layout there is room for both,
+so an empty right half is only a step to take before anything is on screen. On a
+phone the nav *is* the window until a leaf is picked, so nothing is pre-picked
+there.
+
+It also **closes the WebRTC session** a second after the write goes out (long
+enough for the flag patch to leave). Safe mode does not bring webrtc up, so a
+session left running spends the whole window reconnecting to something that will
+never answer, and that backoff is what made the device seem slow to reappear —
+the poll was competing with a reconnect storm for the same link.
+
 > Network and WiFi-scan panels are **not** here — they live in
 > [spangap-net](../../spangap-net)'s `browser/`.
 
