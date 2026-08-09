@@ -1206,8 +1206,10 @@ static void webrtcTaskFn(void*) {
 
         /* Drain inbox + per-connection recv callbacks. When UDP open, poll
            briefly so recvfrom also gets its turn; otherwise block until an
-           inbox message wakes us. */
-        for (;;) {
+           inbox message wakes us. Bounded: a producer that keeps the inbox
+           non-empty must not keep this pass from the yield above — the
+           remainder is simply next pass's work. */
+        for (int i = 0; i < 64; i++) {
             if (!itsPoll(udpFd >= 0 ? 1 : portMAX_DELAY)) break;
         }
 
@@ -1216,13 +1218,19 @@ static void webrtcTaskFn(void*) {
             uint8_t rxBuf[1500];
             struct sockaddr_in from;
             socklen_t fromLen;
-            for (;;) {
+            for (int i = 0; i < 16; i++) {
                 fromLen = sizeof(from);
                 int n = recvfrom(udpFd, rxBuf, sizeof(rxBuf), MSG_DONTWAIT,
                                  (struct sockaddr*)&from, &fromLen);
                 if (n <= 0) break;
                 netTrafficIn(n);
                 handleUdpPacket(rxBuf, n, &from);
+                /* Mid-handshake, one packet can carry a whole DTLS flight and
+                 * cost a second of public-key crypto — and the peer retransmits
+                 * flights while we compute, queuing more of the same. One such
+                 * packet per pass, so the yield at the loop's top stays inside
+                 * the task watchdog and core 0 keeps breathing. */
+                if (!dtlsConnected) break;
             }
         }
 

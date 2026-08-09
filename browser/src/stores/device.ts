@@ -349,7 +349,13 @@ export const useDeviceStore = defineStore('device', () => {
      enterLinkDown instantly via dc.onclose, so genuine disconnects stay
      visible right away. */
   const PING_MS = 1000
-  const LINK_DOWN_MS = 2000
+  /* Patience before a silent link is declared down. Real closes don't wait
+   * for this (dc.onclose fires enterLinkDown directly); this only covers
+   * stalls, and the device can legitimately go quiet for a few seconds
+   * under load — a flash-commit storm or a scheduling spike. Declaring too
+   * eagerly is worse than the stall: the forced reconnect costs a DTLS
+   * handshake that freezes the device for seconds more. */
+  const LINK_DOWN_MS = 6000
   function startHeartbeat() {
     stopHeartbeat()
     /* Active ping. The device echoes {"pong":1}; lastPongAt tracks the last
