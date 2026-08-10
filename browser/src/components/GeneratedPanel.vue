@@ -23,8 +23,8 @@
         v-else-if="row.kind === 'slider'"
         :label="row.label!"
         :k="row.k!"
-        :min="row.min ?? 0"
-        :max="row.max ?? 100"
+        :min="bound(row.minKey, row.min ?? 0)"
+        :max="bound(row.maxKey, row.max ?? 100)"
       />
 
       <SettingText v-else-if="row.kind === 'text' && !row.secret" :label="row.label!" :k="row.k!" />
@@ -85,6 +85,15 @@ const menu = useMenuStore()
 const device = useDeviceStore()
 
 const panel = computed(() => getGeneratedPanel(menu.activePanel))
+
+/* A slider bound the device publishes, falling back to the compiled one until
+ * the key exists. Reactive through the store, so a limit the firmware revises
+ * moves the control with it. */
+function bound(k: string | undefined, fallback: number): number {
+  if (!k) return fallback
+  const v = Number(device.get(k))
+  return Number.isFinite(v) ? v : fallback
+}
 
 function liveValue(k: string): string {
   const v = device.get(k)

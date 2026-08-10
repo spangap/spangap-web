@@ -29,6 +29,11 @@ export interface GenRow {
   k?: string
   min?: number
   max?: number
+  // Slider bounds the device publishes. Where set, the key's value replaces the
+  // number above — a limit the firmware measured on its own hardware, which the
+  // build could not know. The number stays as the fallback until the key exists.
+  minKey?: string
+  maxKey?: string
   secret?: boolean
   options?: GenOption[] // dropdown
   cmd?: string // button / list add-remove
