@@ -28,6 +28,16 @@ const pendingLines: string[] = []
 /** Reactive flag — true when DC is connected. */
 export const logConnected = ref(false)
 
+/** Monotonic counter, bumped when the DEVICE ends the log stream while the
+ *  session is otherwise healthy — i.e. the log source itself went away, not
+ *  the transport under it. The log window closes on this and only this: a
+ *  stream that drops with its session comes back on the next peer connection,
+ *  and the window has to still be there to receive it. */
+export const logStreamEnded = ref(0)
+
+/** Session generation this DC opened in — see the close handler. */
+let dcEpoch = -1
+
 function appendBuffer(text: string) {
   buffer += text
   bufferBytes += text.length
@@ -70,6 +80,7 @@ function buildChannel(pc: RTCPeerConnection) {
   dc.binaryType = 'arraybuffer'
   dc.onopen = () => {
     logConnected.value = true
+    dcEpoch = getSession().epoch
     /* Flush any lines queued while the channel was opening. */
     while (pendingLines.length > 0) {
       const line = pendingLines.shift()!
@@ -83,6 +94,12 @@ function buildChannel(pc: RTCPeerConnection) {
   dc.onclose = () => {
     dc = null
     logConnected.value = false
+    /* Distinguish the device ending the stream from the channel going down
+     * with its session (reconnect, link-down refresh, transport failure).
+     * Only the former is a real end-of-stream; the latter reattaches on the
+     * next peer connection. */
+    if (getSession().sessionHealthy(dcEpoch)) logStreamEnded.value++
+    dcEpoch = -1
   }
   dc.onerror = () => { /* onclose follows */ }
 }
@@ -100,6 +117,7 @@ export function stopLogStream() {
   if (unregisterBuilder) { unregisterBuilder(); unregisterBuilder = null }
   if (dc) { try { dc.close() } catch { /* */ } }
   dc = null
+  dcEpoch = -1
   started = false
   logConnected.value = false
 }

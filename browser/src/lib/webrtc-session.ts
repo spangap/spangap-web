@@ -47,6 +47,30 @@ class WebrtcSession {
   get state(): SessionState { return this._state }
   get pc(): RTCPeerConnection | null { return this._pc }
 
+  /** Generation of the current peer connection. Every teardown bumps it
+   *  BEFORE the PC is closed, so any DataChannel close event that teardown
+   *  causes is dispatched into an already-moved epoch. A channel owner
+   *  captures this when its DC opens and hands it back to sessionHealthy(). */
+  get epoch(): number { return this.generation }
+
+  /** True when the session that carried `epoch` is still the live one and its
+   *  transport still reports connected.
+   *
+   *  This is the test that separates the two reasons a DataChannel closes: the
+   *  far end ended just that channel (session healthy — the owning app quit),
+   *  or the channel went down with its session (reconnect, refresh(), transport
+   *  failure). Consumers that treat a channel close as "the remote app quit"
+   *  MUST gate on this, or every link blip is read as a quit.
+   *
+   *  `connectionState` is read live off the PC rather than from the mirrored
+   *  state, so the answer is correct even when the channel's close event is
+   *  dispatched ahead of onconnectionstatechange. */
+  sessionHealthy(epoch: number): boolean {
+    return epoch === this.generation &&
+           this._state === 'connected' &&
+           this._pc?.connectionState === 'connected'
+  }
+
   /** Wall-clock ms of the last inbound message on ANY DataChannel of this
    *  session — consumers call noteDcActivity() from their onmessage. The
    *  app-level liveness check (device store) treats this as proof-of-life

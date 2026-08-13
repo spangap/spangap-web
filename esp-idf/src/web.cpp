@@ -2083,7 +2083,6 @@ void webMapAddIfAbsent(const char* url, const char* files,
 #define WEB_VERSION 1
 
 void webInit() {
-    pmStatsRequest();   /* -web renders the CPU/PM activity graphs → needs the ring */
     int v = storageGetInt("s.web.version", 0);
     if (v < WEB_VERSION) {
         storageDefaultTree("s.web", R"({

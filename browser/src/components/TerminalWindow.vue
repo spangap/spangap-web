@@ -98,6 +98,8 @@ let dc: RTCDataChannel | null = null
 let resizeObserver: ResizeObserver | null = null
 let unregisterBuilder: (() => void) | null = null
 let wasConnected = false
+/* Session generation this DC opened in — see the close handler. */
+let dcEpoch = -1
 let atBottom = true
 
 /* ── CLI input: dumb terminal ─────────────────────────────────────────────
@@ -193,6 +195,7 @@ function buildChannel(pc: RTCPeerConnection) {
     atBottom = true
     term?.clear()
     wasConnected = true
+    dcEpoch = getSession().epoch
     flushPending()   // send any key pressed while the channel was opening
   }
   dc.onmessage = (ev) => {
@@ -210,12 +213,20 @@ function buildChannel(pc: RTCPeerConnection) {
   }
   dc.onclose = () => {
     dc = null
-    /* The channel is gone — the device closed just this DC (CLI `exit`) or the
-     * whole session dropped. Either way the terminal is dead; close the window,
-     * matching the on-device CLI app, which stops on ITS disconnect. Guarded on
-     * wasConnected so a still-connecting window survives a failed first attempt
-     * and reattaches its DC on the next peer connection. */
-    if (wasConnected) emit('update:visible', false)
+    /* Close the window only when the device ended THIS channel while the
+     * session is otherwise healthy — the far-end CLI quit (`exit`), matching
+     * the on-device CLI app, which stops on ITS disconnect. `wasConnected`
+     * additionally keeps a still-connecting window alive through a failed
+     * first attempt.
+     *
+     * A channel that went down WITH its session (reconnect, the device store's
+     * link-down refresh, transport failure) leaves the window open: the
+     * registered builder runs again on the next peer connection and the
+     * terminal reattaches by itself. Window visibility is persisted as the
+     * user's intent, so letting a transport event lower it would silently
+     * rewrite the layout restored on the next page load. */
+    if (wasConnected && getSession().sessionHealthy(dcEpoch))
+      emit('update:visible', false)
   }
   dc.onerror = () => { /* onclose follows */ }
 }
@@ -237,6 +248,7 @@ function detachSession() {
     try { d.close() } catch { /* */ }
   }
   wasConnected = false
+  dcEpoch = -1
 }
 
 /* ── lifecycle ── */

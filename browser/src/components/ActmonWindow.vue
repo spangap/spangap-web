@@ -79,11 +79,13 @@ const C_BLUE = '#4088E8'          // traffic out
 const C_IN = '#E8D040'            // traffic in (yellow)
 const C_MIX = '#46C05A'           // in + out overlap (green)
 
+/* Both graph buffers start empty at app open and fill live, one sample a second,
+ * from the mirrored sys.stats.* keys (see tick). */
 interface Sample { core0: number; core1: number; sleep: number; apbMax: number; cpuMax: number }
-let samples: Sample[] = []
+const samples: Sample[] = []
 
 interface NetSample { bIn: number; bOut: number; pIn: number; pOut: number }
-let netSamples: NetSample[] = []
+const netSamples: NetSample[] = []
 
 const c0Ref = ref<HTMLCanvasElement>()
 const c1Ref = ref<HTMLCanvasElement>()
@@ -326,7 +328,7 @@ function tick() {
   inactive.value = staleTicks >= STALE_LIMIT
 
   /* Only append on a fresh heartbeat — a frozen device must not pollute the
-   * history with repeated last-values (the graphs go black while frozen). */
+   * graph buffers with repeated last-values (the graphs go black while frozen). */
   if (fresh) {
     samples.push({
       core0: g('cpu_pct.0'), core1: g('cpu_pct.1'),
@@ -343,50 +345,6 @@ function tick() {
 
   updateAvg()
   if (props.visible) redraw()
-}
-
-/* ── one-shot history pre-fill over binary DataChannels (cpuhist / nethist) ── */
-function seedCpu(buf: ArrayBuffer) {
-  const b = new Uint8Array(buf)
-  const n = Math.floor(b.length / 5)
-  const arr: Sample[] = []
-  for (let i = 0; i < n; i++) {
-    const o = i * 5
-    arr.push({ core0: b[o], core1: b[o + 1], sleep: b[o + 2], apbMax: b[o + 3], cpuMax: b[o + 4] })
-  }
-  if (arr.length) { samples = arr.slice(-STEPS); if (props.visible) redraw() }
-}
-function seedNet(buf: ArrayBuffer) {
-  const dv = new DataView(buf)
-  const n = Math.floor(buf.byteLength / 16)
-  const arr: NetSample[] = []
-  for (let i = 0; i < n; i++) {
-    const o = i * 16
-    arr.push({ bIn: dv.getUint32(o, true), bOut: dv.getUint32(o + 4, true),
-               pIn: dv.getUint32(o + 8, true), pOut: dv.getUint32(o + 12, true) })
-  }
-  if (arr.length) { netSamples = arr.slice(-STEPS); if (props.visible) redraw() }
-}
-function histChannel(label: string, onBlob: (buf: ArrayBuffer) => void) {
-  return (pc: RTCPeerConnection) => {
-    let dc: RTCDataChannel
-    try { dc = pc.createDataChannel(label, { ordered: true }) } catch { return }
-    dc.binaryType = 'arraybuffer'
-    dc.onmessage = (ev) => {
-      getSession().noteDcActivity()
-      if (ev.data instanceof ArrayBuffer) onBlob(ev.data)
-      try { dc.close() } catch { /* */ }
-    }
-  }
-}
-/* Re-fetch both blobs over the live connection (a new SCTP stream each, no
- * renegotiation) — covers the black-then-signal-back case where the peer
- * survived, so the device's ring repaints the outage without a page reload. */
-function refetchHistory() {
-  const pc = getSession().pc
-  if (!pc) return
-  histChannel('cpuhist:1', seedCpu)(pc)
-  histChannel('nethist:1', seedNet)(pc)
 }
 
 /* ── responsive collapse (measures the caption blocks) ── */
@@ -410,18 +368,13 @@ function captionsFit(availH: number): boolean {
 const { collapsed, evaluate } = useChromelessFit({ el: bodyEl, fits: captionsFit })
 
 let timer: ReturnType<typeof setInterval> | null = null
-let unregCpu: (() => void) | null = null
-let unregNet: (() => void) | null = null
 
 onMounted(() => {
   timer = setInterval(tick, 1000)
-  unregCpu = getSession().registerChannel(histChannel('cpuhist:1', seedCpu))
-  unregNet = getSession().registerChannel(histChannel('nethist:1', seedNet))
   getSession().connect()
 })
 onUnmounted(() => {
   if (timer) { clearInterval(timer); timer = null }
-  unregCpu?.(); unregNet?.()
   device.set('sys.stats.web_actmon', 0)
 })
 
@@ -432,10 +385,6 @@ watch(() => props.visible, v => {
 
 /* Recompute pill text + tooltip immediately when either window is dragged. */
 watch([pwrWindow, netWindow], updateAvg)
-
-/* Graphs went black then the heartbeat returned: the page didn't reload (that
- * only happens on a firmware/asset change), so re-fetch the ring in place. */
-watch(inactive, (now, was) => { if (was && !now) refetchHistory() })
 </script>
 
 <style scoped>

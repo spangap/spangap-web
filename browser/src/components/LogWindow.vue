@@ -24,7 +24,7 @@ import { ref, watch, onMounted, onUnmounted, nextTick, computed } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import FloatingWindow from './FloatingWindow.vue'
-import { getLogBuffer, subscribeLog, logConnected } from '../stores/log'
+import { getLogBuffer, subscribeLog, logStreamEnded } from '../stores/log'
 import '@xterm/xterm/css/xterm.css'
 
 const props = defineProps<{
@@ -84,6 +84,18 @@ function createTerminal() {
       foreground: '#e0e0e0',
       cursor: '#000000',
       selectionBackground: 'rgba(255,255,255,0.25)',
+      /* Log-level palette. Both the device (s.log.colors.*) and the browser
+       * console hooks emit these ANSI codes, so pinning the slots here fixes
+       * the rendered colour of every level regardless of xterm's defaults:
+       * red 0;31 error, yellow 0;33 warn, green 0;32 info, white 0;37 debug,
+       * brightBlack 0;90 verbose + timestamp. Brightness rises with severity:
+       * the debug grey sits halfway (in CIE L*) between the verbose grey and
+       * a near-white, and info's green stays a notch above it. */
+      red: '#cc0000',
+      yellow: '#c4a000',
+      green: '#60b014',
+      white: '#949791',
+      brightBlack: '#555753',
     },
     cursorBlink: false,
     cursorInactiveStyle: 'none',
@@ -137,11 +149,15 @@ watch(() => props.visible, (vis) => {
   else destroyTerminal()
 })
 
-/* Quit when the log stream drops, matching the on-device Log app (which stops on
- * ITS disconnect). Only on a true→false transition, so a window opened while the
- * stream is still connecting keeps waiting rather than closing immediately. */
-watch(logConnected, (now, was) => {
-  if (was && !now && props.visible) emit('update:visible', false)
+/* Quit when the DEVICE ends the log stream, matching the on-device Log app
+ * (which stops on ITS disconnect). The store raises this only for a stream that
+ * ended under a healthy session; a stream that dropped with its session leaves
+ * the window open and resumes on the next peer connection. Window visibility is
+ * persisted as the user's intent, so a transport event must never lower it —
+ * that is what would drop the window from the layout restored on the next page
+ * load. A window opened while the stream is still connecting simply waits. */
+watch(logStreamEnded, () => {
+  if (props.visible) emit('update:visible', false)
 })
 
 onMounted(() => { if (props.visible) nextTick(showWindow) })

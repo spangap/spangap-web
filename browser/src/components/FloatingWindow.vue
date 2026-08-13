@@ -202,7 +202,13 @@ const windowStyle = computed(() => {
 const bodySize = reactive({ w: 0, h: 0 })
 let resizeObserver: ResizeObserver | null = null
 
-/* ── persistence ── */
+/* ── persistence ──
+ * The stored record is the window's geometry plus the user's intent to have it
+ * open, and it is the whole of what a page load restores. `visible` therefore
+ * only ever moves for a reason the user would recognise (the close dot, a dock
+ * launch, an app deliberately dismissing its own window) — a window whose
+ * content depends on a live link must ride out a link drop rather than lower
+ * `visible`, or the drop would rewrite the layout that comes back next load. */
 const STORAGE_KEY = `spangap.win.${props.id}`
 /* True once a saved geometry has been restored — fitBodyPx respects a user's
  * chosen size and only auto-sizes a window that has never been placed. */
@@ -233,8 +239,15 @@ function loadState(): void {
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null
+let pendingSave: StoredState | null = null
+
+function writeState(s: StoredState): void {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)) }
+  catch { /* quota — ignore */ }
+}
+
 function saveState(): void {
-  const snapshot: StoredState = {
+  pendingSave = {
     x: Math.round(pctX.value * 10) / 10,
     y: Math.round(pctY.value * 10) / 10,
     w: Math.round(pctW.value * 10) / 10,
@@ -242,11 +255,17 @@ function saveState(): void {
     visible: props.visible,
   }
   if (saveTimer) clearTimeout(saveTimer)
-  saveTimer = setTimeout(() => {
-    saveTimer = null
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot)) }
-    catch { /* quota — ignore */ }
-  }, 500)
+  saveTimer = setTimeout(flushState, 500)
+}
+
+/* Write out a debounced save immediately. The debounce coalesces a drag or a
+ * resize into one write; a reload landing inside that window would otherwise
+ * restore the state from before the move, so the page-hide path flushes. */
+function flushState(): void {
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
+  const s = pendingSave
+  pendingSave = null
+  if (s) writeState(s)
 }
 
 /* Persist on visibility changes. */
@@ -465,12 +484,22 @@ onMounted(() => {
       bodySize.h = bodyRef.value.clientHeight
     }
   })
+
+  /* `pagehide` rather than `beforeunload`: it fires on every way a document
+   * stops being shown, including the mobile paths that skip beforeunload. */
+  window.addEventListener('pagehide', flushState)
 })
 
 onUnmounted(() => {
+  window.removeEventListener('pagehide', flushState)
   resizeObserver?.disconnect()
   resizeObserver = null
+  /* A window being unmounted is being taken off screen by its owner, which
+   * may already have dropped this record (a per-instance window drops its
+   * orphaned geometry on close). Discard the debounced write rather than
+   * resurrect the key. */
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
+  pendingSave = null
   if (flashTimer) { clearTimeout(flashTimer); flashTimer = null }
   unregisterWindow(props.id)
 })

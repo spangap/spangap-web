@@ -92,6 +92,19 @@ config-bound controls — `SettingToggle`, `SettingSlider`, `SettingSelect`,
 subscription, optimistic update, and rollback. The shell's own default panels are
 About, System, and Developer.
 
+Headings are one unbroken line. `PanelHeading` and the nav tree's group titles
+carry `white-space: nowrap; overflow: hidden` and the `v-fit-text` directive
+(`lib/fitText.ts`): when the phrase is wider than its box, the type size drops
+by one division — glyph advances scale linearly with size, so no trial sizes and
+no convergence loop — and a long heading shrinks instead of wrapping or being
+clipped. The text itself is never rewritten, so find-in-page and copy still see
+the phrase the menu store and panel descriptors carry. Every fit measures at the
+stylesheet size (the inline size is cleared first), so repeated fits land on the
+same answer; a `ResizeObserver` re-fits on layout changes and `document.fonts.
+ready` re-fits once the real face has replaced the fallback metrics. Block
+elements only — on an inline-block, writing the size back would change the width
+being measured.
+
 The System panel carries the **Backup & Recovery** actions — back up, restore,
 factory reset. Each one is an ordinary storage write (`s.sys.backup`,
 `s.sys.restore`, `s.sys.factory_reset`), which the firmware turns into a reboot
@@ -142,7 +155,18 @@ always carries an `m=application` line (without this Chrome rejects the answer w
 "order of m-lines doesn't match"). `connect()` is idempotent, so the device store,
 terminal, and an app's player can't race to tear down the same PC. Closing and
 reopening a DC on the same PC is cheap (DCEP reset + open, no DTLS handshake) — the
-natural "seek" / "switch source" mechanism. Session states: `idle`, `connecting`,
+natural "seek" / "switch source" mechanism.
+
+A channel close means one of two very different things, and a consumer that acts
+on it must tell them apart: the far end ended **that channel** (its app quit), or
+the channel went down **with its session** (reconnect, the device store's
+link-down `refresh()`, transport failure). `session.epoch` is the generation of
+the current PC, bumped by every teardown *before* the PC is closed; a consumer
+records it in its `onopen` and asks `session.sessionHealthy(epoch)` in its
+`onclose`. True means the far-end app quit. False means the transport went and
+the builder will run again on the next PC — the consumer keeps its UI and
+reattaches, because a link blip is not a user action and must not be treated as
+one. Session states: `idle`, `connecting`,
 `connected`, `busy` (4409), `kicked` (4008), `auth` (4401), `error`. `busy` and
 `kicked` disable auto-reconnect and surface a "Take over" / "Resume" overlay
 (`ConnectionOverlay.vue`); other close codes auto-reconnect with backoff.
@@ -170,7 +194,13 @@ emitted before the DC opens, and hooks `console.*` + `window.error`/
 `unhandledrejection` so browser console output is mirrored to the device log
 (pre-coloured with ANSI so xterm and other consumers render it identically).
 `LogWindow.vue` is a pure xterm display over this buffer; `TerminalWindow.vue`
-owns its own `cli:1` DC.
+owns its own `cli:1` DC. Both windows close themselves when the device ends
+their channel under a healthy session — the CLI's `exit`, the log stream
+stopping — mirroring the on-device CLI and Log apps, which stop on their own ITS
+disconnect. The store publishes that as `logStreamEnded`, a counter raised only
+for a stream that ended while the session was up; `logConnected` stays the plain
+"channel is open" flag. A drop that takes the whole session leaves both windows
+on screen, and their channels reattach on the next PC.
 
 ## Auth and the login flow
 
@@ -184,11 +214,19 @@ shipped login and first-run onboarding pages; wire them into the app router.
 
 ## Floating windows
 
-`FloatingWindow.vue` is the generic draggable / resizable / dockable shell behind
-the log, terminal, and editor windows. Per-window geometry, dock side/size, and
-visibility persist in `localStorage` under `spangap.win.<id>`. It is pointer-event
-driven (`touch-action: none` so phones don't hijack the gesture as scroll) and
-gives phones a sensible first-run layout via an optional `defaultDock` prop.
+`FloatingWindow.vue` is the generic draggable / resizable shell behind the log,
+terminal, and editor windows. Per-window geometry and visibility persist in
+`localStorage` under `spangap.win.<id>`, and that record is the whole of what a
+page load restores. It is pointer-event driven (`touch-action: none` so phones
+don't hijack the gesture as scroll).
+
+**The persisted `visible` flag is user intent.** It moves only for something the
+user would recognise as opening or closing the window — the close dot, a dock
+launch, an app dismissing its own window. A window whose content rides a live
+link therefore rides out a link drop with `visible` untouched and reattaches when
+the session returns; lowering it on a transport event would quietly rewrite the
+layout that comes back on the next page load, and the window would be missing
+from every load after that.
 
 **Click-to-focus is click-to-focus only.** A click anywhere in a background
 (non-front-most) window raises and focuses it, and that click is swallowed — it

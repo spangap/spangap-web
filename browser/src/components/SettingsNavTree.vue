@@ -10,7 +10,7 @@
   <div class="nav-tree">
     <template v-for="item in visibleItems" :key="item.id">
       <div v-if="item.type === 'submenu'" class="nav-group">
-        <div class="nav-group-title">{{ item.label }}</div>
+        <div v-fit-text class="nav-group-title">{{ item.label }}</div>
         <SettingsNavTree
           class="nav-children"
           :items="item.children ?? []"
@@ -33,6 +33,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { MenuItem } from '../stores/menu'
+import { vFitText } from '../lib/fitText'
 
 const props = defineProps<{ items: MenuItem[]; active: string | null }>()
 const emit = defineEmits<{ select: [id: string] }>()
@@ -49,11 +50,18 @@ const visibleItems = computed(() =>
 <style scoped>
 .nav-children { margin-left: 10px; }
 .nav-group-title {
-  font-size: 12px;
+  font-size: 18px;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: rgba(255, 255, 255, 0.45);
-  margin: 10px 0 2px;
+  color: #fff;
+  margin: 26px 0 2px;
+  /* A group title is one unbroken line — the spaces hold their words together
+   * exactly as non-breaking spaces would, without rewriting the label the menu
+   * store carries. With overflow hidden, v-fit-text reads the unbroken phrase
+   * width off scrollWidth and shrinks the type to fit the rail. */
+  white-space: nowrap;
+  overflow: hidden;
 }
 .nav-leaf {
   padding: 6px 10px;

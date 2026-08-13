@@ -22,6 +22,8 @@ compiles it. The shell pieces:
 - **`lib/generatedPanels.ts`** + **`components/GeneratedPanel.vue`** — the
   declarative-panel registry and its single runtime renderer.
 - **`lib/webrtc-session.ts`** — the shared `RTCPeerConnection` singleton.
+- **`lib/fitText.ts`** — the `v-fit-text` directive: keeps a one-line heading on
+  one line, shrinking the type size to fit rather than wrapping or clipping.
 - **`stores/device.ts`** / **`stores/log.ts`** — config sync and the log ring.
 - **`lib/auth.ts`** + `pages/{LoginPage,SetupPage}.vue` — the auth flow.
 - **`components/`** — `Dock`, `SettingsWindow`, `SettingsNavTree`, `FloatingWindow`,
