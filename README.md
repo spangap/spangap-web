@@ -45,6 +45,21 @@ generated init dispatcher brings them up in the platform band, after core and
 net. A `--no-web` build simply stages neither, and the browser activator emits
 nothing. There is no hand-written init call for a consumer to make.
 
+## What the browser tells the device
+
+The device store (`browser/src/stores/device.ts`) pushes a few things the device
+cannot know on its own, over the config channel:
+
+- **Clock and timezone**, once per fresh dump, and only where the device lacks
+  them: epoch seconds to `sys.time.set` when `sys.time.valid` is `0`, the IANA
+  zone name to `s.ntp.tz` when unset.
+- **Human presence**: `sys.human_detected = 1` on the first pointer, key, wheel
+  or touch event in the tab. Device-side holds that only exist to protect an
+  unattended node end when it lands (see core's
+  [init](../spangap-core/docs/init.md)). One message per channel, not per event
+  — the flag is sticky for the device's boot, and a reconnect re-sends it
+  because a fresh channel may be a rebooted device.
+
 ## What it does NOT own
 
 - WiFi / TCP / TLS / the HTTPS certificate / the WebRTC UDP port — [spangap-net](../spangap-net).

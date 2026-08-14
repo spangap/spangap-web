@@ -29,6 +29,8 @@ browser/
     │                       TerminalWindow, EditorWindow, ConnectionOverlay, UsableArea
     ├── stores/             device, log, menu, index (pinia setup)
     ├── modules/            advanced, editor, system (self-register on import)
+    ├── vite/               dev-server plugins (plain .mjs — they run in the
+    │                       config loader, not in the app bundle)
     ├── panels/             AboutPanel, SystemPanel, DeveloperPanel
     └── pages/              LoginPage, SetupPage
 ```
@@ -77,7 +79,30 @@ import 'spangap-browser/modules/editor';
 // pages — wire into your app's router
 import LoginPage from 'spangap-browser/pages/LoginPage.vue';
 import SetupPage from 'spangap-browser/pages/SetupPage.vue';
+
+// dev-server plugins — for quasar.config.ts, not for the app bundle
+import { workspaceMounts } from 'spangap-browser/vite/workspace-mounts';
 ```
+
+`workspaceMounts` serves directories of the spangap workspace as extra dev-server
+paths, so a page that expects them beside itself in production finds them there
+under `spangap dev` too. Vite has one static root, so extra trees can only be
+middleware; the mounts register in `configureServer`, ahead of Vite's own static
+and transform middlewares, or the request would resolve as an app asset first.
+
+```typescript
+build: {
+  vitePlugins: [
+    [workspaceMounts, { '/flashmon': 'flashmon/flashmon', '/builds': 'builds' }],
+  ],
+}
+```
+
+Paths are workspace-relative (`SPANGAP_WORKSPACE`, which `spangap dev` sets) or
+absolute. A mount whose directory isn't there is skipped with a warning, so a
+bare `quasar dev` outside a workspace still starts — minus those paths. Dev only:
+the plugin declares no build hooks, and in production whatever serves the app
+serves these too.
 
 Modules in `spangap-browser/modules/*` self-register with the menu store
 (`useMenuStore`) on import — your app imports them once (typically from a Quasar

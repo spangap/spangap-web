@@ -39,6 +39,10 @@ export const useDeviceStore = defineStore('device', () => {
   let everConnected = false
   let reloading = false
   let clientInfoPushed = false
+  /** Somebody has interacted with this tab (see pushHuman), and whether that has
+   *  been told to the device over the channel we currently hold. */
+  let humanSeen = false
+  let humanPushed = false
   /** Keys set while DC was down; flushed on reconnect so record.* toggles reach the device. */
   const pendingSet = new Map<string, string | number>()
 
@@ -202,6 +206,32 @@ export const useDeviceStore = defineStore('device', () => {
     updateZonesIfStale()
   }
 
+  /** Tell the device a person is at this UI. The device holds several
+   *  timeouts that only exist to protect an unattended node — chief among them
+   *  the startup quiet period before it may transmit — and drops them when
+   *  `sys.human_detected` lands. Sent as a command, not a set: it is a signal
+   *  about us, not config we mirror.
+   *
+   *  One message per channel, not per event: the flag is sticky for the
+   *  device's boot, so the listeners below only have to catch the first real
+   *  interaction. A click before the channel opened still counts — humanSeen
+   *  outlives the connection and pushes on the next sync. */
+  function pushHuman() {
+    if (humanPushed || !dc || dc.readyState !== 'open') return
+    humanPushed = true
+    sendCommand({ sys: { human_detected: 1 } })
+  }
+
+  /* Real interaction only: a pointer going down, a key going down, a scroll, a
+   * touch. Capture phase so a handler that stops propagation can't hide the
+   * person from us, passive so none of this delays the gesture itself. */
+  for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+    window.addEventListener(ev, () => {
+      humanSeen = true
+      pushHuman()
+    }, { capture: true, passive: true })
+  }
+
   function updateZonesIfStale() {
     /* The device's IANA→POSIX map is a plain file at /state/timezones.json,
      * no longer a config subtree. We track the version we last uploaded in
@@ -298,6 +328,9 @@ export const useDeviceStore = defineStore('device', () => {
       everConnected = true
       lastPongAt = Date.now()      /* fresh baseline so the liveness check doesn't trip */
       clientInfoPushed = false
+      /* A fresh channel may be a rebooted device, whose flag went with it. */
+      humanPushed = false
+      if (humanSeen) pushHuman()
       startHeartbeat()
       flushPendingSets()
     }
