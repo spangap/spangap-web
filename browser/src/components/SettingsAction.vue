@@ -8,9 +8,14 @@
   and no special case for "confirm then do".
 -->
 <template>
+  <!-- A coloured button is filled with the palette colour, the way a pill is;
+       an uncoloured one keeps the outline every other button has. -->
   <q-btn
-    dense no-caps outline
-    :color="danger ? 'negative' : 'primary'"
+    dense no-caps
+    :outline="!color"
+    :unelevated="!!color"
+    :color="color ? undefined : 'primary'"
+    :style="color ? { backgroundColor: paletteColor(color), color: '#fff' } : undefined"
     :label="label"
     @click="run(action)"
   />
@@ -23,7 +28,7 @@
           v-for="(b, i) in dialog.buttons"
           :key="i"
           flat no-caps
-          :color="b.danger ? 'negative' : undefined"
+          :style="b.color ? { color: paletteColor(b.color) } : undefined"
           :label="b.label"
           @click="pick(b)"
         />
@@ -41,14 +46,15 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { subst, runSet } from '../lib/settingsRuntime'
+import { subst, runSet, paletteColor } from '../lib/settingsRuntime'
 import type { GenAction, GenDialog, GenDialogButton, GenForm } from '../lib/settingsNodes'
 import SettingsFormDialog from './SettingsFormDialog.vue'
 
 const props = defineProps<{
   label: string
   action: GenAction
-  danger?: boolean
+  /** A palette name ("red", "amber", …) or an explicit "rrggbb". */
+  color?: string
   /** The collection item this action is scoped to, for `{field}` substitution. */
   scope?: Record<string, unknown> | null
 }>()

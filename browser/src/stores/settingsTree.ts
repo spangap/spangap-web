@@ -6,7 +6,9 @@
  * path of segment ids, conjures whatever is missing along the way, and appends
  * a row block, so several straddles contributing at the same path simply
  * concatenate. A node's path is its stable id (deep links, the nav tree's
- * selection), exactly as the menu paths were.
+ * selection), exactly as the menu paths were. A node with no rows and no
+ * rendering descendant is not shown (nodeRenders below): naming a menu is not
+ * the same as showing one.
  *
  * This is deliberately NOT the menu store: that one keeps serving the menu-bar
  * groups (advanced/…, app/…), which are a window-manager mechanism with a
@@ -29,7 +31,7 @@ export interface SettingsNode {
   short: string // compact name; defaults to the label
   order?: number
   arrival: number
-  named: boolean // somebody supplied a label — first contributor wins
+  named: boolean // somebody supplied a label — last setter wins
   shortNamed: boolean
   rows: GenRow[]
   children: SettingsNode[]
@@ -39,6 +41,19 @@ export const ROOT_PATH = 'settings'
 
 function titleCase(s: string): string {
   return s ? s[0].toUpperCase() + s.slice(1) : s
+}
+
+/** A node renders if it has anything to show: its own rows, or a descendant
+ *  that has. Declaring a node is therefore not the same as putting it on the
+ *  screen — a straddle may name a menu and give it an order while it is still
+ *  empty, and it appears the moment somebody contributes to it. */
+export function nodeRenders(node: SettingsNode): boolean {
+  return node.rows.length > 0 || node.children.some(nodeRenders)
+}
+
+/** A node's children, minus the ones with nothing to render. */
+export function visibleChildren(node: SettingsNode): SettingsNode[] {
+  return node.children.filter(nodeRenders)
 }
 
 /** Siblings: ordered first ascending, unordered after them in arrival order. */
@@ -72,7 +87,7 @@ export const useSettingsTreeStore = defineStore('settingsTree', () => {
     return parent.children.find(c => c.id === id)
   }
 
-  /** Merge a contribution: walk/conjure the path, apply first-contributor-wins
+  /** Merge a contribution: walk/conjure the path, apply last-setter-wins
    *  naming, then append the row block at the last segment. */
   function contribute(segments: GenSegment[], rows: GenRow[]): SettingsNode {
     let node = root
@@ -92,9 +107,9 @@ export const useSettingsTreeStore = defineStore('settingsTree', () => {
         })
         node.children.push(next)
       }
-      if (seg.label && !next.named) { next.label = seg.label; next.named = true }
-      if (seg.short && !next.shortNamed) { next.short = seg.short; next.shortNamed = true }
-      if (seg.order !== undefined && next.order === undefined) next.order = seg.order
+      if (seg.label) { next.label = seg.label; next.named = true }
+      if (seg.short) { next.short = seg.short; next.shortNamed = true }
+      if (seg.order !== undefined) next.order = seg.order
       if (!next.shortNamed) next.short = next.label
       node.children.sort(bySiblingOrder)
       node = next

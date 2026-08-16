@@ -23,6 +23,21 @@ export function subst(tmpl: string | undefined, scope: Scope): string {
   })
 }
 
+/* One palette, named the same way wherever a colour is stated — a status pill,
+ * a button. The firmware's table (lcd_settings_desc.cpp) holds these same
+ * hexes, so a red button is the red a red pill is on either surface. */
+const NAMED: Record<string, string> = {
+  green: '#2e7d43', red: '#8b2b2b', amber: '#8a6d1f',
+  blue: '#2563a0', grey: '#3a4658', gray: '#3a4658',
+}
+
+/** A palette name or an explicit "rrggbb" as CSS. Empty falls back to grey,
+ *  which is what an unstated pill colour has always been. */
+export function paletteColor(name: string | undefined): string {
+  if (!name) return NAMED.grey
+  return NAMED[name] ?? (name.startsWith('#') ? name : `#${name}`)
+}
+
 /** A gate key is TRUTHY or it is not, never compared against a value — the
  *  firmware publishes gate keys as truthy/empty exactly so this stays a
  *  one-liner on both surfaces. */

@@ -25,7 +25,9 @@ compiles it. The shell pieces:
 - **`lib/settingsNodes.ts`** + **`components/NodePane.vue`** — the descriptor
   types with the build's entry point, and the single runtime renderer.
 - **`lib/settingsRuntime.ts`** + **`lib/reboot.ts`** — `{field}` substitution,
-  gate truthiness and the `set` action; and the reboot-wait choreography a
+  gate truthiness, the `set` action and `paletteColor` (the one colour table,
+  shared by status pills and coloured buttons and holding the same hexes the
+  firmware's `pillColor` does); and the reboot-wait choreography a
   `reboots: true` write names instead of re-implementing.
 - **`lib/webrtc-session.ts`** — the shared `RTCPeerConnection` singleton.
 - **`lib/fitText.ts`** — the `v-fit-text` directive: keeps a one-line heading on
@@ -81,16 +83,21 @@ the About pane).
 
 `contribute(segments, rows)` walks the path of segment ids from the root,
 conjuring what is missing, and appends the row block at the last segment. Naming
-is first-contributor-wins per field (`named`/`shortNamed` guard the label and the
-short name), so whoever names a node names it; a node nobody names keeps its
-title-cased id. Siblings sort by `bySiblingOrder`: nodes carrying an `order`
-first ascending, the rest after them in arrival order — the same rule the LCD
-registry and the generator use.
+is last-setter-wins per field; a node nobody names keeps its title-cased id.
+Siblings sort by `bySiblingOrder`: nodes carrying an `order` first ascending, the
+rest after them in arrival order — the same rule the LCD registry and the
+generator use.
 
 There is **no leaf model**. A node with only children renders as a list of them,
 a node with only rows renders as a panel, and one with both renders both, rows
 first. `activePath` defaults to the root, which is why there is no
 first-pane-default-landing workaround any more.
+
+`nodeRenders(node)` / `visibleChildren(node)` are the emptiness rule: a node
+shows only if it has rows or a descendant that does. `SettingsNavTree` filters
+the rail through them and `NodePane` the chevron list, so a menu declared for its
+name and order alone (spangap-core's `apps` / `system`, reticulous's
+`reticulum`) stays out of both until something contributes to it.
 
 `registerSettingsNodes` (`lib/settingsNodes.ts`) is the build's entry point; the
 same file carries the descriptor types. `NodePane.vue` renders a node, delegating
@@ -98,6 +105,18 @@ its rows to `SettingRows.vue`, which maps each `GenRow.kind` to a `Setting*`
 component. A `secret` text row is **write-only**: it renders a password field
 that is never read back (the value lives in `secrets.*`, which is not synced to
 the browser) and writes via a setter.
+
+Two kinds are laid out in `SettingRows` itself rather than by a `Setting*`
+control, because they are arrangements rather than controls. A `buttons` row is
+a flex line whose `justify-content` comes from `align`, holding one
+`SettingsAction` per item, each with its own `whenKey`. An `info` row is a
+two-track grid — `minmax(0, min(33%, max-content)) 1fr` — which is the whole of
+what the LCD has to measure for itself: content-sized, capped at a third.
+
+The build hands over a node's rows already assembled, sections merged, one
+fragment per node. Nothing here concatenates blocks or de-duplicates a heading;
+`contribute()` appending is only for the hand-written contributions that arrive
+after the generated ones.
 
 `SettingsAction.vue` fronts the three action kinds — a `set` write, a dialog
 whose buttons nest further actions, or a form. `SettingsFormDialog.vue` holds its

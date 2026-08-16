@@ -63,7 +63,16 @@ their row blocks.
 
 Siblings sort by one rule: nodes carrying an `order` first ascending, everything
 else after them in arrival order. The build emits contributions pre-sorted (it
-knows straddle init order), so arrival order is already meaningful.
+knows straddle init order), so arrival order is already meaningful. Naming is
+last-setter-wins per field, so the buildable has the final say over the tree its
+image ships.
+
+A node with no rows and no rendering descendant is **not shown** — not in the
+rail, not as a chevron in a pane. Declaring a node is therefore not the same as
+putting it on the screen: the top-level menus are named and ordered once each
+(spangap-core names Apps and System, spangap-net names WiFi & Network, the
+buildable names Reticulum Mesh) and each appears only once something contributes
+to it.
 
 `SettingsWindow.vue` renders the tree as a first-class app window (the gear Dock
 icon): a nav rail plus the selected node on desktop, a drill-down on phones. The
@@ -88,9 +97,19 @@ nodes: one generic renderer, no SFC per pane.
 
 Row kinds: `section`, `caption`, `switch`, `slider`, `text` (with a write-only
 `secret` variant), `dropdown` (optionally `searchable`), `value` (read-only live
-text, optionally `copyable`), `button`, and `list` — a collection with an item
-editor, add forms, removal, reordering and scan-and-adopt candidates. Any row may
-carry `whenKey`, which shows it while a key is truthy.
+text, optionally `copyable`), `button`, `buttons` (several content-sized buttons
+on one line, gathered left, centre or right, each optionally gated on its own
+key), `info` (a run of value rows as one block: a shared label column sized to
+the widest label and capped at a third, and no gap between the lines), and
+`list` — a collection with an item editor, add forms, removal, reordering and
+scan-and-adopt candidates. Any row may carry `whenKey`, which shows it while a
+key is truthy. A row the build gated with `when_surface: lcd` never reaches here
+at all — the backup and restore buttons are the reverse case, `when_surface: web`,
+because the archive they move needs a browser on the other end.
+
+Sections do not repeat. Two straddles writing `section: "Status"` at one node
+get one heading with both sets of rows under it — merged by the build, since a
+node's rows arrive here already assembled.
 
 Two firmware conventions are what let a static descriptor describe a whole pane,
 and both are worth knowing before writing UI code here:
@@ -113,7 +132,12 @@ A **button** runs an action: `set` (write a key, optionally `edge` to force a
 change past the storage actor's dedup, or `reboots` to run the shared
 reboot-wait behaviour in `lib/reboot.ts`), `dialog` (a confirmation or choice
 with no input fields, whose buttons nest further actions), or `form` (the one
-dialog with inputs, because it fronts a sentinel).
+dialog with inputs, because it fronts a sentinel). Any button — a row's, one of
+a `buttons:` line's, a dialog's, a collection item's — may state a `color` from
+the palette a status pill uses (`red`, `green`, `amber`, `blue`, `grey`, or an
+explicit `rrggbb`, all resolved by `paletteColor` in `lib/settingsRuntime`). A
+coloured button is filled with it, the way a pill is; an uncoloured one keeps
+the outline every other button has.
 
 ### Hand-written panels and the `Setting*` controls
 

@@ -35,7 +35,9 @@ export interface GenSet {
 
 export interface GenDialogButton {
   label: string
-  danger?: boolean
+  /** A palette name ("red", "green", "amber", "blue", "grey") or an explicit
+   *  "rrggbb" — the same vocabulary and the same table a status pill uses. */
+  color?: string
   do?: GenAction
 }
 
@@ -62,7 +64,16 @@ export interface GenAction {
 
 export interface GenItemAction {
   label: string
-  danger?: boolean
+  color?: string
+  do: GenAction
+}
+
+/** One button of a `buttons:` row. A lone `button:` row spans its line; these
+ *  share one, so each sizes to its label and the row states where they sit. */
+export interface GenButton {
+  label: string
+  color?: string
+  whenKey?: string
   do: GenAction
 }
 
@@ -77,7 +88,8 @@ export interface GenCandidates {
 }
 
 export interface GenRow {
-  kind: string // section|caption|switch|slider|text|dropdown|value|button|list|component
+  // section|caption|switch|slider|text|dropdown|value|button|buttons|info|list|component
+  kind: string
   text?: string // section / caption
   label?: string
   k?: string // storage key (pane rows)
@@ -96,8 +108,15 @@ export interface GenRow {
   options?: GenOption[]
   searchable?: boolean // type-to-filter picker, for lists too long to scan
   copyable?: boolean // value rows: click-to-copy
-  danger?: boolean
+  color?: string // button: a palette name or "rrggbb"
   do?: GenAction // button
+  // buttons — several content-sized buttons on one line, gathered at `align`
+  align?: 'left' | 'center' | 'right'
+  items?: GenButton[]
+  // info — a run of read-only values as one compact block: a shared label column
+  // sized to the widest label but never wider than a third, and no gap between
+  // the lines. Value rows only; a control needs room a narrow column cannot give.
+  rows?: GenRow[]
   // list (a collection)
   id?: string
   item?: string

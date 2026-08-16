@@ -30,58 +30,65 @@ init:
   - call: webInit
   - call: webrtcInit
 
-# Backup & Recovery, contributed to the System node spangap-net names. No node
-# is owned: the rows land beside the hostname and time rows without either
-# straddle knowing about the other.
+# Backup & Recovery and Factory Reset, contributed to the System node
+# spangap-core names. No node is owned: the rows land beside the hostname and
+# time rows without either straddle knowing about the other.
 #
-# Each of the three is one edge-triggered write that the firmware turns into a
-# reboot into safe mode, so each is a `set` with `edge` (the flag may be left
-# set by an attempt that did not reboot, and without the edge the next press
-# would write a value the key already holds and nothing would happen) and
-# `reboots` (the shared wait-and-reload behaviour, instead of per-panel
-# choreography). The confirmations are dialogs because there is nothing to type.
+# Each action is one edge-triggered write that the firmware turns into a reboot
+# into safe mode, so each is a `set` with `edge` (the flag may be left set by an
+# attempt that did not reboot, and without the edge the next press would write a
+# value the key already holds and nothing would happen) and `reboots` (the shared
+# wait-and-reload behaviour, instead of per-panel choreography). The
+# confirmations are dialogs because there is nothing to type.
+#
+# Backing up and restoring are `when_surface: web`: both move an archive between
+# the device and the machine that pressed the button, and a display has nobody
+# on the other end of that. Factory reset asks for no file, so it is on both.
 settings:
   - at:
-      - { id: system, label: "System", order: 1 }
-    order: 10
+      - { id: system }
     rows:
       - section: "Backup & Recovery"
-      - caption: "Each of these reboots the device into a safe mode that runs the operation with nothing else touching its state, then reboots again. Everything else stays off for the duration."
-      - button:
-          label: "Back up state"
-          do:
-            dialog:
-              text: "To back up all the user state on this device, it needs to reboot in safe mode, send you the file and reboot again."
-              buttons:
-                - { label: "Cancel" }
-                - label: "Reboot and back up"
-                  do: { set: { key: "s.sys.backup", value: 1, edge: true, reboots: true } }
-      - button:
-          label: "Restore from backup"
-          do:
-            dialog:
-              text: "The device reboots into safe mode and asks for an archive. Everything on its state store — settings, identities, keys, messages — is erased before the archive is written, and there is no way back to what is there now."
-              buttons:
-                - { label: "Cancel" }
-                - label: "Reboot and restore"
-                  danger: true
-                  do: { set: { key: "s.sys.restore", value: 1, edge: true, reboots: true } }
+        when_surface: web
+      # One choice, two directions — so one line rather than two full-width
+      # buttons. Each states the same thing about safe mode, in its own tense.
+      - buttons:
+          items:
+            - label: "Back up state"
+              do:
+                dialog:
+                  text: "Reboots in safe mode where nothing else runs, so nothing touches storage while the backup is in progress."
+                  buttons:
+                    - { label: "Cancel" }
+                    - label: "OK"
+                      do: { set: { key: "s.sys.backup", value: 1, edge: true, reboots: true } }
+            - label: "Restore from backup"
+              do:
+                dialog:
+                  text: "Reboots in safe mode where nothing else runs, so nothing touches storage while the restore is in progress."
+                  buttons:
+                    - { label: "Cancel" }
+                    - label: "OK"
+                      color: red
+                      do: { set: { key: "s.sys.restore", value: 1, edge: true, reboots: true } }
+        when_surface: web
+      - section: "Factory Reset"
       # The wipe target is a choice, so it is a dialog of buttons rather than a
       # picker plus a confirm: each button states exactly what it erases.
       - button:
           label: "Factory reset"
-          danger: true
+          color: red
           do:
             dialog:
               text: "Every trace of this device's configuration, keys and identity is overwritten with random bytes — not deleted, overwritten, so nothing survives a flash dump. It comes back as a brand-new device on its own access point, and this browser will no longer find it here."
               buttons:
                 - { label: "Cancel" }
                 - label: "Erase device flash"
-                  danger: true
+                  color: red
                   do: { set: { key: "s.sys.factory_reset", value: 1, edge: true, reboots: true } }
                 - label: "Erase SD card state"
-                  danger: true
+                  color: red
                   do: { set: { key: "s.sys.factory_reset", value: 2, edge: true, reboots: true } }
                 - label: "Erase both"
-                  danger: true
+                  color: red
                   do: { set: { key: "s.sys.factory_reset", value: 3, edge: true, reboots: true } }

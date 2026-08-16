@@ -39,7 +39,7 @@
         :key="i"
         :label="a.label"
         :action="a.do"
-        :danger="a.danger"
+        :color="a.color"
         :scope="withId(item)"
       />
 
@@ -119,7 +119,7 @@
 import { computed, ref, watch, onUnmounted } from 'vue'
 import { useDeviceStore } from '../stores/device'
 import { useSettingsTreeStore } from '../stores/settingsTree'
-import { subst } from '../lib/settingsRuntime'
+import { subst, paletteColor } from '../lib/settingsRuntime'
 import type { GenRow, GenForm } from '../lib/settingsNodes'
 import PanelHeading from './PanelHeading.vue'
 import SettingsAction from './SettingsAction.vue'
@@ -188,16 +188,7 @@ function pill(item: Item): { text: string; color: string } {
   if (!props.row.status) return { text: '', color: '' }
   const raw = device.get(subst(props.row.status, withId(item)))
   const [text = '', color = ''] = String(raw ?? '').split('|')
-  return { text, color: cssColor(color) }
-}
-
-const NAMED: Record<string, string> = {
-  green: '#2e7d43', red: '#8b2b2b', amber: '#8a6d1f',
-  blue: '#2563a0', grey: '#3a4658', gray: '#3a4658',
-}
-function cssColor(name: string): string {
-  if (!name) return NAMED.grey
-  return NAMED[name] ?? (name.startsWith('#') ? name : `#${name}`)
+  return { text, color: paletteColor(color) }
 }
 
 /** The item editor is the collection's `edit:` rows over `<cmd>.set`, so the

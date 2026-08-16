@@ -7,21 +7,21 @@
 -->
 <template>
   <div class="nav-tree">
-    <template v-for="node in nodes" :key="node.path">
+    <template v-for="node in shown" :key="node.path">
       <div
         class="nav-node"
         :class="{
           'nav-node--active': node.path === active,
-          'nav-node--group': node.children.length > 0,
+          'nav-node--group': kidsOf(node).length > 0,
         }"
         @click="tree.open(node.path)"
       >
         <span v-fit-text class="nav-node-label">{{ node.label }}</span>
       </div>
       <SettingsNavTree
-        v-if="node.children.length"
+        v-if="kidsOf(node).length"
         class="nav-children"
-        :nodes="node.children"
+        :nodes="kidsOf(node)"
         :active="active"
       />
     </template>
@@ -29,12 +29,18 @@
 </template>
 
 <script setup lang="ts">
-import { useSettingsTreeStore } from '../stores/settingsTree'
+import { computed } from 'vue'
+import { useSettingsTreeStore, nodeRenders, visibleChildren } from '../stores/settingsTree'
 import type { SettingsNode } from '../stores/settingsTree'
 import { vFitText } from '../lib/fitText'
 
-defineProps<{ nodes: SettingsNode[]; active: string | null }>()
+const props = defineProps<{ nodes: SettingsNode[]; active: string | null }>()
 const tree = useSettingsTreeStore()
+
+/* A menu nobody has contributed to is a name, not a destination — it stays out
+ * of the rail until it holds something, here and in the pane alike. */
+const shown = computed(() => props.nodes.filter(nodeRenders))
+const kidsOf = visibleChildren
 </script>
 
 <style scoped>

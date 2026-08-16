@@ -65,7 +65,38 @@
       </div>
 
       <div v-else-if="row.kind === 'button'">
-        <SettingsAction :label="row.label!" :action="row.do!" :danger="row.danger" />
+        <SettingsAction :label="row.label!" :action="row.do!" :color="row.color" />
+      </div>
+
+      <!-- Several buttons on one line, gathered left, centre or right. Each is
+           content-sized (a lone button: row is the full-width one), and a button
+           may carry its own gate — a hidden one leaves the line entirely. -->
+      <div v-else-if="row.kind === 'buttons'" class="btn-row" :style="{ justifyContent: JUSTIFY[row.align ?? 'left'] }">
+        <template v-for="(b, j) in row.items ?? []" :key="j">
+          <SettingsAction
+            v-if="rowVisible(b.whenKey, null)"
+            :label="b.label"
+            :action="b.do"
+            :color="b.color"
+          />
+        </template>
+      </div>
+
+      <!-- An info group: one shared label column sized to the widest label and
+           capped at a third, and no gap between the lines. The grid track does
+           the sizing that the LCD has to measure for itself. -->
+      <div v-else-if="row.kind === 'info'" class="info-grid">
+        <template v-for="(r, j) in row.rows ?? []" :key="j">
+          <template v-if="visible(r)">
+            <div class="info-label">{{ r.label }}</div>
+            <div
+              class="info-value"
+              :class="{ 'value-copyable': r.copyable }"
+              :title="r.copyable ? 'Click to copy' : undefined"
+              @click="r.copyable && copy(liveValue(r.k!))"
+            >{{ liveValue(r.k!) }}</div>
+          </template>
+        </template>
       </div>
 
       <SettingsCollection v-else-if="row.kind === 'list'" :row="row" />
@@ -90,6 +121,8 @@ import SettingsCollection from './SettingsCollection.vue'
 
 defineProps<{ rows: GenRow[] }>()
 const device = useDeviceStore()
+
+const JUSTIFY = { left: 'flex-start', center: 'center', right: 'flex-end' } as const
 
 function visible(row: GenRow): boolean {
   return rowVisible(row.whenKey, null)
@@ -125,5 +158,35 @@ function copy(text: string) {
   cursor: pointer;
   user-select: all;
   text-decoration: underline dotted rgba(255, 255, 255, 0.3);
+}
+.btn-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* The label track is content-sized and capped at a third: narrower than an
+ * ordinary row's label column where the labels are short, never wider. The
+ * rows sit against each other — a readout is one block, not a list of rows. */
+.info-grid {
+  display: grid;
+  grid-template-columns: minmax(0, min(33%, max-content)) 1fr;
+  column-gap: 12px;
+  row-gap: 0;
+  align-items: baseline;
+}
+.info-label {
+  font-size: 12px;
+  opacity: 0.7;
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.info-value {
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>
