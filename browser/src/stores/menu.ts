@@ -1,17 +1,18 @@
 import { defineStore } from 'pinia'
 import { ref, computed, reactive, type Component } from 'vue'
+import { useSettingsTreeStore } from './settingsTree'
+import type { GenSegment } from '../lib/settingsNodes'
 
 /**
- * Path-based menu registry (mirrors the LCD's lcdRegisterSettings).
+ * Path-based menu registry for the MENU-BAR groups (advanced/…, app/…) — a
+ * window-manager mechanism with a genuine leaf model.
  *
  * Callers register one leaf at a slash-path; the store auto-creates the
  * intermediate group/submenu containers (title-cased from their id) and folds
  * concurrent registrations together by path. e.g.
  *
- *   register('settings/system/general', 'General', { type: 'panel', component })
- *   register('settings/network/wifi',   'WiFi',    { type: 'panel', component })
+ *   register('advanced/backlog', 'Backlog Size', { type: 'panel', component })
  *
- * both land under one "Settings" menu, "System"/"Network" submenus merged by id.
  * First segment = top-level menu-bar group, last = the leaf, middle = submenus.
  * Minimum path is `group/leaf` (>= 2 segments).
  *
@@ -22,6 +23,13 @@ import { ref, computed, reactive, type Component } from 'vue'
  *   < 0  right/bottom block, ascending  (-1 is furthest right/bottom)
  * Ties within a block sort alphabetically by label. Containers default to 0;
  * override a container's label/placement with setMenu().
+ *
+ * SETTINGS PATHS ARE NOT THIS. A `settings/…` path is forwarded to the
+ * settings-tree store, which has no leaf model at all (every node holds rows
+ * and children) and orders siblings by the declarative `order:` rule rather
+ * than by placement buckets. The forwarding is transitional: it exists so a
+ * hand-written *Panel.vue can occupy a node until its straddle's `settings:`
+ * block describes it, and it goes with the last of them.
  */
 
 export type MenuLeaf =
@@ -116,9 +124,29 @@ export const useMenuStore = defineStore('menu', () => {
     rec(group.items)
   }
 
+  /** A `settings/…` path as segments the tree store can merge, naming only the
+   *  last one (the intermediate labels come from whoever named them first —
+   *  usually a `settings:` block's `at:`). */
+  function settingsSegments(segs: string[], label?: string, order?: number): GenSegment[] {
+    return segs.slice(1).map((id, i) => {
+      const last = i === segs.length - 2
+      const seg: GenSegment = { id, label: last && label ? label : '' }
+      if (last && order !== undefined && order !== 0) seg.order = order
+      return seg
+    })
+  }
+
   function register(path: string, label: string, leaf: MenuLeaf, opts: RegisterOpts = {}) {
     const segs = splitPath(path)
     if (segs.length < 2) throw new Error(`menu path needs at least group/leaf: "${path}"`)
+
+    if (segs[0] === 'settings') {
+      if (leaf.type !== 'panel') throw new Error(`settings paths hold panes, not ${leaf.type}: "${path}"`)
+      useSettingsTreeStore().contribute(
+        settingsSegments(segs, label, opts.placement),
+        [{ kind: 'component', component: leaf.component }])
+      return
+    }
 
     const group = ensureGroup(segs[0])
     let siblings = group.items
@@ -193,6 +221,13 @@ export const useMenuStore = defineStore('menu', () => {
   function setMenu(path: string, opts: { label?: string; placement?: number; hidden?: boolean | (() => boolean) }) {
     const segs = splitPath(path)
     if (!segs.length) return
+    if (segs[0] === 'settings') {
+      /* Naming a settings node with no rows to add. The root itself is named
+       * by the tree store, so a bare 'settings' path has nothing to say here. */
+      if (segs.length > 1)
+        useSettingsTreeStore().contribute(settingsSegments(segs, opts.label, opts.placement), [])
+      return
+    }
     const group = ensureGroup(segs[0])
     if (segs.length === 1) {
       if (opts.label !== undefined) group.label = opts.label

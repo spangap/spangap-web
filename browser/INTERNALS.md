@@ -14,10 +14,10 @@ browser/
 ├── tsconfig.json
 └── src/
     ├── index.ts            re-exports lib/* + stores/{device,log,menu}
-    ├── lib/                apps, generatedPanels, auth, device-url, reconnect,
+    ├── lib/                apps, settingsNodes, settingsRuntime, reboot, auth,
     │                       viewport, windows, webrtc-session, safeMode
     ├── components/         SettingToggle/Slider/Select/Text, PanelHeading,
-    │                       GeneratedPanel, GeneratedListRow, Dock, SettingsWindow,
+    │                       NodePane, SettingRows, SettingsCollection, Dock, SettingsWindow,
     │                       SettingsNavTree, FloatingWindow, LogWindow,
     │                       TerminalWindow, EditorWindow, ConnectionOverlay, UsableArea
     ├── stores/             device, log, menu, index
@@ -53,11 +53,12 @@ package-structural invariants that matter when editing components here:
   each straddle registering its window from the same `register*` module that
   wires its menu items. Clicking an icon calls the entry's `open()`; `isOpen()`
   drives the running-app indicator.
-- **Settings is an app window**, not a drawer: `SettingsWindow.vue` +
-  recursive `SettingsNavTree.vue` (the gear Dock icon) host the same
-  `settings/…` menu tree (nav rail + panel pane on desktop, drill-down on
-  phone), and generated settings panes mount inside it. The menu store stays for
-  that settings hierarchy; only the old `window/*` menu actions went away.
+- **Settings is an app window**, not a drawer: `SettingsWindow.vue` + recursive
+  `SettingsNavTree.vue` (the gear Dock icon) host the settings TREE
+  (`stores/settingsTree.ts`) — nav rail + node pane on desktop, drill-down on
+  phone. Every node holds rows and children, so there is no leaf model and the
+  root is renderable. The menu store keeps the menu-bar groups and forwards
+  `settings/…` paths here.
 - **No window docking.** `FloatingWindow.vue` is pure floating on desktop and
   full-screen on a phone. The dock store (`docks` / `dockOrder` / `dockWindow` /
   `layout`, and per-window `canDock` / `defaultDock`) is gone from
@@ -94,14 +95,16 @@ When `spangap-web` is in the firmware build graph (and `--no-web-ui` is not set)
 the build generates a dispatcher (`straddles.gen.ts`) that walks every consumed
 straddle's `browser/` subdir, imports its `register*` module (self-registering its
 apps and menu items), registers its declarative settings panels via
-`registerGeneratedPanels`, and bundles its app icons via `registerAppIcons`. This
+`registerSettingsNodes`, and bundles its app icons via `registerAppIcons`. This
 package's `modules/` are picked up the same way — there is no hard-coded list.
 
-## Adding panels
+## Adding settings
 
-- A **generated** pane: add a `settings:` block to the owning straddle.yaml; the
-  build lowers it to a `GenPanel` descriptor and `GeneratedPanel.vue` renders it.
-- A **hand-written** pane: place `MyPanel.vue` in the owning straddle's
+- A **declared** pane: add a `settings:` block to the owning straddle.yaml; the
+  build lowers it to `GenNode` fragments and `NodePane.vue` renders them. This is
+  the default — the block is expressive enough for editors, confirmations and
+  forms, so a hand-written pane now needs a reason.
+- A **hand-written** pane (transitional): place `MyPanel.vue` in the owning straddle's
   `browser/src/panels/` and register it from that straddle's `register*` module:
 
 ```typescript

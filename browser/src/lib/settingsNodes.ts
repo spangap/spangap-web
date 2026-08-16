@@ -1,0 +1,136 @@
+/**
+ * The settings descriptor types, and the entry point the build calls.
+ *
+ * spangap-inside lowers every straddle's `settings:` block into node-tree
+ * FRAGMENTS — a path of segments plus one row block — inlined into the
+ * buildable's straddles.gen.ts and handed to registerSettingsNodes(). The
+ * settings-tree store merges them by segment id; one renderer (NodePane.vue)
+ * interprets the rows. There is no generated component per pane and no YAML
+ * parser in the SPA.
+ *
+ * Two firmware conventions are what let a static descriptor describe a whole
+ * pane. The firmware publishes FINISHED STRINGS: a status pill, a subtitle, a
+ * value row all render exactly what the key holds, so nothing here formats,
+ * composes or compares — a `whenKey` gate is a truthiness test, never an
+ * equality one. And the firmware VALIDATES IN SENTINEL HANDLERS: a form
+ * submits to a command key and the owning task answers on `<cmd>.error`, so
+ * this side submits and displays rather than checking as you type.
+ */
+import type { Component } from 'vue'
+import { useSettingsTreeStore } from '../stores/settingsTree'
+
+export interface GenOption {
+  label: string
+  value: string
+}
+
+/** Write a key. `edge` writes 0 first, forcing a change past the storage
+ *  actor's dedup; `reboots` runs the shared reboot-wait behaviour after. */
+export interface GenSet {
+  key: string
+  value: string
+  edge?: boolean
+  reboots?: boolean
+}
+
+export interface GenDialogButton {
+  label: string
+  danger?: boolean
+  do?: GenAction
+}
+
+/** A confirmation or choice. No input fields, ever — that is what a form is
+ *  for. Every button closes the dialog; a button with no action is a cancel. */
+export interface GenDialog {
+  text: string
+  buttons: GenDialogButton[]
+}
+
+/** The one dialog that carries inputs, because it fronts a sentinel. */
+export interface GenForm {
+  fields: GenRow[]
+  cmd: string
+  submit?: string
+  title?: string
+}
+
+export interface GenAction {
+  set?: GenSet
+  dialog?: GenDialog
+  form?: GenForm
+}
+
+export interface GenItemAction {
+  label: string
+  danger?: boolean
+  do: GenAction
+}
+
+/** Scan-and-adopt: an ephemeral array the owning task publishes. Picking a row
+ *  opens the collection's first add form, prefilled. */
+export interface GenCandidates {
+  k: string
+  item: string
+  subtitle?: string
+  refresh?: { label: string; do: GenAction }
+  map?: Record<string, string>
+}
+
+export interface GenRow {
+  kind: string // section|caption|switch|slider|text|dropdown|value|button|list|component
+  text?: string // section / caption
+  label?: string
+  k?: string // storage key (pane rows)
+  field?: string // form / item-editor field name
+  dflt?: string // form prefill; may be a "{field}" template. Never seeded
+  whenKey?: string // show only while truthy; "{field}" allowed inside a form
+  min?: number
+  max?: number
+  // Slider bounds the device publishes. Where set, the key's value replaces the
+  // number above — a limit the firmware measured on its own hardware, which the
+  // build could not know. The number stays as the fallback until the key exists.
+  minKey?: string
+  maxKey?: string
+  secret?: boolean
+  placeholder?: string
+  options?: GenOption[]
+  searchable?: boolean // type-to-filter picker, for lists too long to scan
+  copyable?: boolean // value rows: click-to-copy
+  danger?: boolean
+  do?: GenAction // button
+  // list (a collection)
+  id?: string
+  item?: string
+  subtitle?: string
+  status?: string
+  empty?: string
+  orderable?: boolean
+  cmd?: string
+  add?: { label: string; form: GenForm }[]
+  remove?: { confirm?: string }
+  actions?: GenItemAction[]
+  edit?: GenRow[]
+  candidates?: GenCandidates
+  // A hand-written panel occupying this node, contributed through the menu
+  // store's settings adapter. Transitional: it goes with the last *Panel.vue.
+  component?: Component
+}
+
+/** One path segment, carrying the naming this contributor proposes. */
+export interface GenSegment {
+  id: string
+  label: string
+  short?: string
+  order?: number
+}
+
+/** One contribution: a path, and the rows to add at its last segment. */
+export interface GenNode {
+  segments: GenSegment[]
+  rows: GenRow[]
+}
+
+export function registerSettingsNodes(nodes: GenNode[]): void {
+  const tree = useSettingsTreeStore()
+  for (const node of nodes) tree.contribute(node.segments, node.rows)
+}

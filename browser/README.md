@@ -5,7 +5,7 @@
 **spangap-browser** is the browser-side runtime and shared UI shell for
 [spangap](../../spangap) device apps: the WebRTC session manager, config sync, the
 config-bound `Setting*` controls, the path-based menu/settings system and the
-`GeneratedPanel` renderer, the Dock app launcher, FloatingWindow / LogWindow /
+settings-tree renderer, the Dock app launcher, FloatingWindow / LogWindow /
 TerminalWindow / EditorWindow, the default System/About/Developer panels, the auth
 + session flow, and the login / setup pages. It is the npm half of the
 [spangap-web](..) straddle and pairs in lockstep with its firmware half.
@@ -21,17 +21,18 @@ browser/
 ├── tsconfig.json
 └── src/
     ├── index.ts            re-exports (lib/* + the three stores)
-    ├── lib/                apps, generatedPanels, auth, device-url, reconnect,
+    ├── lib/                apps, settingsNodes, settingsRuntime, reboot, auth,
     │                       viewport, windows, webrtc-session, safeMode
     ├── components/         SettingToggle/Slider/Select/Text, PanelHeading,
-    │                       GeneratedPanel, GeneratedListRow, Dock, SettingsWindow,
+    │                       NodePane, SettingRows, SettingsCollection, Dock, SettingsWindow,
     │                       SettingsNavTree, FloatingWindow, LogWindow,
     │                       TerminalWindow, EditorWindow, ConnectionOverlay, UsableArea
-    ├── stores/             device, log, menu, index (pinia setup)
+    ├── stores/             device, log, menu, settingsTree, index (pinia setup)
     ├── modules/            advanced, editor, system (self-register on import)
     ├── vite/               dev-server plugins (plain .mjs — they run in the
     │                       config loader, not in the app bundle)
-    ├── panels/             AboutPanel, SystemPanel, DeveloperPanel
+    ├── panels/             AboutPanel, DeveloperPanel (menu-bar panes; settings
+    │                       are described in each straddle.yaml, not written here)
     └── pages/              LoginPage, SetupPage
 ```
 
@@ -63,7 +64,7 @@ import { useDeviceStore, useLogStore, useMenuStore } from 'spangap-browser';
 
 // lib
 import { registerApp } from 'spangap-browser/lib/apps';
-import { registerGeneratedPanels } from 'spangap-browser/lib/generatedPanels';
+import { registerSettingsNodes } from 'spangap-browser/lib/settingsNodes';
 import { webrtcSession } from 'spangap-browser/lib/webrtc-session';
 import { authLogin, checkAuth } from 'spangap-browser/lib/auth';
 
@@ -118,7 +119,7 @@ staged straddle automatically.
   isOpen?, placement? })` from `lib/apps`.
 - **Register a settings pane** with `useMenuStore().register('settings/<group>/<leaf>',
   label, { type: 'panel', component })`; or let the build generate it from a
-  straddle.yaml `settings:` block via `registerGeneratedPanels`.
+  straddle.yaml `settings:` block via `registerSettingsNodes`.
 - **`useDeviceStore()`** exposes the live device state, populated over the
   `storage:1` DataChannel.
 - **`webrtcSession`** is a singleton; call `webrtcSession.registerChannel(builder)`
@@ -137,5 +138,5 @@ staged straddle automatically.
 
 - [INTERNALS.md](INTERNALS.md) — package-scope developer notes.
 - [../docs/browser-shell.md](../docs/browser-shell.md) — the shell model
-  (Dock, menu store, generated panels, the WebRTC session).
+  (Dock, menu store, the settings tree, the WebRTC session).
 - [../README.md](../README.md) — the straddle overview and the full function index.

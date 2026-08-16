@@ -1,16 +1,14 @@
 <!--
-  GeneratedPanel — the single runtime renderer for declarative settings panels.
+  SettingRows — the runtime renderer for a node's row block.
 
-  The build inlines each straddle.yaml `settings:` block as a JSON descriptor
-  (see lib/generatedPanels.ts) and registers it in the menu tree pointing here.
-  The menu store renders a panel component with no props, so we find our own
-  descriptor from the active-panel id. Each row kind maps to the matching
-  Setting* component (the same ones a hand-written *Panel.vue uses), so a
-  generated pane and a hand-written one are visually identical.
+  Each row kind maps to the matching Setting* component (the same ones a
+  hand-written panel uses), so a declared row and a hand-written one are
+  visually identical. Rows are storage-bound here; the form dialog renders the
+  same descriptors against a local buffer instead.
 -->
 <template>
-  <div v-if="panel" class="q-gutter-y-md">
-    <template v-for="(row, i) in panel.rows" :key="i">
+  <template v-for="(row, i) in rows" :key="i">
+    <template v-if="visible(row)">
       <PanelHeading v-if="row.kind === 'section'">{{ row.text }}</PanelHeading>
 
       <div v-else-if="row.kind === 'caption'" class="text-caption" style="opacity:0.7; line-height:1.35">
@@ -53,38 +51,49 @@
         :label="row.label!"
         :k="row.k!"
         :options="row.options ?? []"
+        :searchable="row.searchable"
       />
 
       <div v-else-if="row.kind === 'value'" class="row items-center no-wrap">
         <div class="col-4 text-caption">{{ row.label }}</div>
-        <div class="col text-caption">{{ liveValue(row.k!) }}</div>
+        <div
+          class="col text-caption"
+          :class="{ 'value-copyable': row.copyable }"
+          :title="row.copyable ? 'Click to copy' : undefined"
+          @click="row.copyable && copy(liveValue(row.k!))"
+        >{{ liveValue(row.k!) }}</div>
       </div>
 
       <div v-else-if="row.kind === 'button'">
-        <q-btn dense no-caps outline color="primary" :label="row.label" @click="fireCmd(row)" />
+        <SettingsAction :label="row.label!" :action="row.do!" :danger="row.danger" />
       </div>
 
-      <GeneratedListRow v-else-if="row.kind === 'list'" :row="row" />
+      <SettingsCollection v-else-if="row.kind === 'list'" :row="row" />
+
+      <!-- A hand-written panel still occupying this node. Transitional. -->
+      <component :is="row.component" v-else-if="row.kind === 'component' && row.component" />
     </template>
-  </div>
+  </template>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue'
-import { useMenuStore } from '../stores/menu'
 import { useDeviceStore } from '../stores/device'
-import { getGeneratedPanel, type GenRow } from '../lib/generatedPanels'
+import { rowVisible } from '../lib/settingsRuntime'
+import type { GenRow } from '../lib/settingsNodes'
 import PanelHeading from './PanelHeading.vue'
 import SettingToggle from './SettingToggle.vue'
 import SettingSlider from './SettingSlider.vue'
 import SettingText from './SettingText.vue'
 import SettingSelect from './SettingSelect.vue'
-import GeneratedListRow from './GeneratedListRow.vue'
+import SettingsAction from './SettingsAction.vue'
+import SettingsCollection from './SettingsCollection.vue'
 
-const menu = useMenuStore()
+defineProps<{ rows: GenRow[] }>()
 const device = useDeviceStore()
 
-const panel = computed(() => getGeneratedPanel(menu.activePanel))
+function visible(row: GenRow): boolean {
+  return rowVisible(row.whenKey, null)
+}
 
 /* A slider bound the device publishes, falling back to the compiled one until
  * the key exists. Reactive through the store, so a limit the firmware revises
@@ -95,6 +104,7 @@ function bound(k: string | undefined, fallback: number): number {
   return Number.isFinite(v) ? v : fallback
 }
 
+/* Whatever the key holds, verbatim — the firmware publishes the finished text. */
 function liveValue(k: string): string {
   const v = device.get(k)
   return v === undefined || v === null ? '' : String(v)
@@ -105,7 +115,15 @@ function setSecret(k: string, v: string | number | null) {
   device.save()
 }
 
-function fireCmd(row: GenRow) {
-  if (row.cmd) device.set(row.cmd, row.payload ?? '1')
+function copy(text: string) {
+  navigator.clipboard?.writeText(text).catch(() => { /* denied or insecure origin */ })
 }
 </script>
+
+<style scoped>
+.value-copyable {
+  cursor: pointer;
+  user-select: all;
+  text-decoration: underline dotted rgba(255, 255, 255, 0.3);
+}
+</style>

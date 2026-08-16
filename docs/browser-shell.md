@@ -3,7 +3,7 @@
 The browser half of this straddle is the npm package **`spangap-browser`**: the
 shared UI shell that consuming Quasar / Vue 3 apps assemble into their device SPA.
 It provides the app launcher (the Dock), the path-based menu and settings system,
-the declarative `GeneratedPanel` renderer, the config-bound `Setting*` controls,
+the declarative settings tree and its renderer, the config-bound `Setting*` controls,
 the floating windows (log, terminal, editor), the WebRTC session singleton, and
 the auth / login flow.
 
@@ -51,37 +51,69 @@ separate icon asset ships to the device. On desktop the Dock is a centered
 floating bar; on a phone it is a fixed bottom nav bar that shows the first four
 apps plus a "More" sheet when there are more than five.
 
-## The menu and settings system
+## The settings tree
 
-Settings live in a path-based menu store, `useMenuStore` (`stores/menu`), mirroring
-the LCD's `lcdRegisterSettings`. A caller registers one leaf at a slash-path and
-the store auto-creates the intermediate containers:
+Settings are **one tree**, held by `useSettingsTreeStore` (`stores/settingsTree`)
+and mirroring the LCD's `lcdSettingsContribute`. Every node holds key/value
+**rows** *and* **children**: the pane renders its rows first, then its children
+as navigation entries. There is no leaf/container distinction, and no node is
+owned — a contribution names a path of segment ids, every intermediate node on
+the way is conjured, and two straddles contributing at the same path concatenate
+their row blocks.
 
-```ts
-import { useMenuStore } from 'spangap-browser'
-const menu = useMenuStore()
-menu.register('settings/system/general', 'General', { type: 'panel', component })
-```
+Siblings sort by one rule: nodes carrying an `order` first ascending, everything
+else after them in arrival order. The build emits contributions pre-sorted (it
+knows straddle init order), so arrival order is already meaningful.
 
-The first segment is the top-level group, the last is the leaf, the middle are
-submenus merged by id (minimum path `group/leaf`). A leaf is a `panel` (a settings
-pane), a `toggle` (a device-store dotpath rendered as a switch), or an `action`.
-`placement` orders siblings the same way the Dock does. `SettingsWindow.vue`
-renders the tree as a first-class app window (the gear Dock icon): a nav rail plus
-the selected pane on desktop, a drill-down on phones.
+`SettingsWindow.vue` renders the tree as a first-class app window (the gear Dock
+icon): a nav rail plus the selected node on desktop, a drill-down on phones. The
+root is an ordinary node, so opening Settings lands on something rather than on
+an instruction to pick something.
 
-### Declarative panels (`GeneratedPanel`)
+The **menu store** (`stores/menu`) is a different thing and stays: it serves the
+menu-bar groups (`advanced/…`, `app/…`), a window-manager mechanism with a
+genuine leaf model. A `settings/…` path handed to it is forwarded into the tree,
+which is the transitional adapter that lets a hand-written `*Panel.vue` occupy a
+node until its straddle describes it declaratively.
 
-Most settings panes are not hand-written. The build lowers each straddle.yaml
-`settings:` block into a JSON descriptor and calls `registerGeneratedPanels`
-(`lib/generatedPanels`), which registers each panel's menu leaf pointing at one
-shared `GeneratedPanel.vue`. At render time the panel finds its descriptor by the
-active-panel id and maps each row to the matching `Setting*` component, so a
-generated pane is visually identical to a hand-written one. Row kinds: `section`,
-`caption`, `switch`, `slider`, `text` (with a write-only `secret` variant),
-`dropdown`, `value` (read-only live value), `button`, and `list` (an
-add/remove editor over an array, e.g. host:port entries). This is the web parallel
-to the firmware's generated settings panes — one generic renderer, no SFC per pane.
+### Declarative settings
+
+Settings panes are not hand-written. The build lowers every straddle.yaml
+`settings:` block into node-tree fragments and calls `registerSettingsNodes`
+(`lib/settingsNodes`), which merges them into the tree; one renderer
+(`NodePane.vue` over `SettingRows.vue`) interprets the rows, mapping each to the
+matching `Setting*` component — so a declared pane is visually identical to a
+hand-written one. This is the web parallel to the firmware's generated settings
+nodes: one generic renderer, no SFC per pane.
+
+Row kinds: `section`, `caption`, `switch`, `slider`, `text` (with a write-only
+`secret` variant), `dropdown` (optionally `searchable`), `value` (read-only live
+text, optionally `copyable`), `button`, and `list` — a collection with an item
+editor, add forms, removal, reordering and scan-and-adopt candidates. Any row may
+carry `whenKey`, which shows it while a key is truthy.
+
+Two firmware conventions are what let a static descriptor describe a whole pane,
+and both are worth knowing before writing UI code here:
+
+- **The firmware publishes finished strings.** A value row, a subtitle, a status
+  pill all render exactly what the key holds. Nothing on this side formats,
+  composes or compares; a gate is tested for truthiness, never equality.
+- **The firmware validates in sentinel handlers.** A form submits its fields as
+  one JSON object to a command key, and the owning task answers on the sentinel
+  family's error/ack pair — `<cmd>.error` / `<cmd>.done`, shared by all of one
+  collection's sentinels and passed into the form dialog by the collection; a
+  bare form defaults to `<form-cmd>.error` / `.done`. A reason on the error key
+  keeps the dialog open showing it; the ack key moving closes it (an edit that
+  changes nothing still acks). The dialog clears the error key just before each
+  submit so an identical rejection still registers as a change. This side
+  submits and displays — there is no client-side validation, and a collection
+  never writes its own array.
+
+A **button** runs an action: `set` (write a key, optionally `edge` to force a
+change past the storage actor's dedup, or `reboots` to run the shared
+reboot-wait behaviour in `lib/reboot.ts`), `dialog` (a confirmation or choice
+with no input fields, whose buttons nest further actions), or `form` (the one
+dialog with inputs, because it fronts a sentinel).
 
 ### Hand-written panels and the `Setting*` controls
 
@@ -98,7 +130,7 @@ carry `white-space: nowrap; overflow: hidden` and the `v-fit-text` directive
 by one division — glyph advances scale linearly with size, so no trial sizes and
 no convergence loop — and a long heading shrinks instead of wrapping or being
 clipped. The text itself is never rewritten, so find-in-page and copy still see
-the phrase the menu store and panel descriptors carry. Every fit measures at the
+the phrase the settings tree and its descriptors carry. Every fit measures at the
 stylesheet size (the inline size is cleared first), so repeated fits land on the
 same answer; a `ResizeObserver` re-fits on layout changes and `document.fonts.
 ready` re-fits once the real face has replaced the fallback metrics. Block

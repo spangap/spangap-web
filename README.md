@@ -13,7 +13,7 @@ maintainer reference under [`docs/`](docs/):
 |---|---|---|
 | **web** — HTTP/HTTPS server, file serving, WebDAV, the URL-forwarding model, auth enforcement, the loopback exemption | [docs/web.md](docs/web.md) | [docs/web-internals.md](docs/web-internals.md) |
 | **webrtc** — DTLS/ICE-lite/SCTP plumbing and the content-free DataChannel↔ITS router | [docs/webrtc.md](docs/webrtc.md) | [docs/webrtc-internals.md](docs/webrtc-internals.md) |
-| **browser-shell** — the SPA shell: the Dock app launcher, `registerApp`, the menu store, `GeneratedPanel`, the WebRTC session, config sync, and auth flow | [docs/browser-shell.md](docs/browser-shell.md) | [docs/browser-shell-internals.md](docs/browser-shell-internals.md) |
+| **browser-shell** — the SPA shell: the Dock app launcher, `registerApp`, the menu store, the settings tree and its renderer, the WebRTC session, config sync, and auth flow | [docs/browser-shell.md](docs/browser-shell.md) | [docs/browser-shell-internals.md](docs/browser-shell-internals.md) |
 
 The firmware half lives in [`esp-idf/`](esp-idf/) (`web.cpp`, `auth_web.cpp`,
 `webrtc_task.cpp`, `webrtc_sctp.cpp`, `safe_mode.cpp` — the recovery boot's page
@@ -64,6 +64,9 @@ cannot know on its own, over the config channel:
 
 - WiFi / TCP / TLS / the HTTPS certificate / the WebRTC UDP port — [spangap-net](../spangap-net).
 - The credential / session / realm primitive — [spangap-core auth](../spangap-core/docs/auth.md).
-- Network and WiFi-scan settings panels (`NetworkPanel`, `WifiScanDialog`) — those
-  live in [spangap-net](../spangap-net)'s `browser/`.
-- Camera / video / RTSP UI and app-specific panels — the consuming app's `browser/`.
+- Any straddle's settings rows — those are the `settings:` block in that
+  straddle's own `straddle.yaml`, which the build lowers into the tree this
+  shell renders. WiFi, mDNS and System live in
+  [spangap-net](../spangap-net); Backup & Recovery is contributed here, to the
+  System node net names, because these rows are about the platform's own state.
+- Camera / video / RTSP UI and app-specific windows — the consuming app's `browser/`.

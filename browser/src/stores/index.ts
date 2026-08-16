@@ -7,3 +7,4 @@
 export { useDeviceStore } from './device'
 export { useLogStore } from './log'
 export { useMenuStore } from './menu'
+export { useSettingsTreeStore } from './settingsTree'

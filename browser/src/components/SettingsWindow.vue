@@ -1,14 +1,13 @@
 <!--
-  SettingsWindow — Settings as a first-class app window (the gear dock icon),
-  replacing the old left drawer.
+  SettingsWindow — Settings as a first-class app window (the gear dock icon).
 
   Desktop: two panes — a nav rail (the settings tree) on the left, the selected
-  panel on the right. Phone: the FloatingWindow is full-screen and we drill down
-  — the nav fills the window until a leaf is picked, then the panel replaces it
+  node on the right. Phone: the FloatingWindow is full-screen and we drill down
+  — the nav fills the window until a node is picked, then the pane replaces it
   with a "‹ Settings" back affordance.
 
-  Generated panels (GeneratedPanel.vue) and hand-written panes both register
-  under the 'settings/…' menu path and render here unchanged.
+  The right half always has something in it: the root is an ordinary node, so
+  opening Settings lands on it rather than on an instruction to pick something.
 -->
 <template>
   <FloatingWindow
@@ -20,16 +19,15 @@
     @update:visible="(v) => emit('update:visible', v)"
   >
     <div class="settings-window">
-      <div v-if="!compact || !activePanel" class="settings-nav">
-        <SettingsNavTree :items="rootItems" :active="activePanel" @select="select" />
+      <div v-if="!compact || atRoot" class="settings-nav">
+        <SettingsNavTree :nodes="tree.root.children" :active="tree.activePath" />
       </div>
 
-      <div v-if="!compact || activePanel" class="settings-pane">
-        <div v-if="compact && activePanel" class="settings-back" @click="back">‹ Settings</div>
+      <div v-if="!compact || !atRoot" class="settings-pane">
+        <div v-if="compact && !atRoot" class="settings-back" @click="tree.close()">‹ Settings</div>
         <q-scroll-area class="settings-scroll">
           <div class="settings-scroll-inner">
-            <component :is="activeComponent" v-if="activeComponent" />
-            <div v-else class="settings-empty">Select a setting from the list.</div>
+            <NodePane :node="tree.activeNode" />
           </div>
         </q-scroll-area>
       </div>
@@ -38,43 +36,20 @@
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue'
-import { useMenuStore } from '../stores/menu'
+import { computed } from 'vue'
+import { useSettingsTreeStore, ROOT_PATH } from '../stores/settingsTree'
 import { useCompact } from '../lib/viewport'
 import FloatingWindow from './FloatingWindow.vue'
 import SettingsNavTree from './SettingsNavTree.vue'
+import NodePane from './NodePane.vue'
 
-const props = defineProps<{ visible: boolean; focusToken?: number }>()
+defineProps<{ visible: boolean; focusToken?: number }>()
 const emit = defineEmits<{ 'update:visible': [value: boolean] }>()
 
-const menu = useMenuStore()
+const tree = useSettingsTreeStore()
 const compact = useCompact()
 
-/* The 'settings' top-level group's children (System / Internet / Mesh Network…). */
-const rootItems = computed(() => {
-  const g = menu.menus.get('settings')
-  return g ? g.items : []
-})
-
-const activePanel = computed(() => menu.activePanel)
-const activeComponent = computed(() => menu.activePanelComponent)
-
-/* Opening Settings lands on the first pane rather than on "Select a setting"
- * — the two-pane window has room for both, so an empty right half is a step
- * the operator has to take before anything is on screen. It is the first pane
- * by placement, not a hard-coded id, so a build without System still lands
- * somewhere. Phone is untouched: there the nav IS the window until a leaf is
- * picked, and pre-picking one would hide the list behind a back link. */
-function defaultPanel() {
-  if (!props.visible || compact.value || menu.activePanel) return
-  const first = rootItems.value.find(i => i.type === 'panel')
-  if (first) menu.openPanel(first.id)
-}
-
-watch(() => [props.visible, rootItems.value.length], defaultPanel, { immediate: true })
-
-function select(id: string) { menu.openPanel(id) }
-function back() { menu.closePanel() }
+const atRoot = computed(() => tree.activePath === ROOT_PATH)
 </script>
 
 <style scoped>
@@ -107,11 +82,6 @@ function back() { menu.closePanel() }
 }
 .settings-scroll { flex: 1; }
 .settings-scroll-inner { padding: 14px; }
-.settings-empty {
-  padding: 24px;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 14px;
-}
 /* Phone: nav fills the full-screen window. */
 .fw--compact .settings-nav { flex: 1; max-width: none; border-right: none; }
 </style>

@@ -1,7 +1,7 @@
 <!--
   PanelHeading — the section heading inside a settings panel ("Time & Date",
   "Access Point", "Known Networks"). Registered globally as <PanelHeading>, so
-  the hand-written panels, every straddle's panel and GeneratedPanel's `section`
+  the hand-written panels, every straddle's panel and the declarative `section`
   rows all render through this one component.
 
   A heading is always a single unbroken line: it never breaks between words.

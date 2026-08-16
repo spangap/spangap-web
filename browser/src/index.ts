@@ -12,3 +12,4 @@ export * from './lib/webrtc-session';
 export * from './stores/device';
 export * from './stores/log';
 export * from './stores/menu';
+export * from './stores/settingsTree';
