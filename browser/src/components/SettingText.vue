@@ -10,7 +10,7 @@
       autocorrect="off"
       autocapitalize="off"
       spellcheck="false"
-      data-form-type="other"
+      v-bind="NO_MANAGER"
       @update:model-value="onChange"
     />
   </div>
@@ -18,6 +18,7 @@
 
 <script setup lang="ts">
 import { useDeviceStore } from '../stores/device'
+import { NO_MANAGER } from '../lib/settingsRuntime'
 
 const props = defineProps<{ label: string; k: string }>()
 const device = useDeviceStore()

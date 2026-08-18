@@ -65,6 +65,10 @@ export interface GenAction {
 export interface GenItemAction {
   label: string
   color?: string
+  // Show this action only while the key is truthy. `{field}` templates against
+  // the ITEM to build the key — unlike a row's whenKey, where a template names a
+  // sibling field's value. The firmware publishes the gate.
+  whenKey?: string
   do: GenAction
 }
 
@@ -78,17 +82,27 @@ export interface GenButton {
 }
 
 /** Scan-and-adopt: an ephemeral array the owning task publishes. Picking a row
- *  opens the collection's first add form, prefilled. */
+ *  opens the collection's first add form, prefilled.
+ *
+ *  The results are a POPUP on both surfaces, opened by the
+ *  refresh button and headed by `found`: what the device can see is a different
+ *  question from what it is configured for, and a transient answer to it —
+ *  arriving over seconds, changing, and gone once you stop asking. Opening the
+ *  popup starts the scan and closing it stops the scan. */
 export interface GenCandidates {
   k: string
   item: string
   subtitle?: string
+  found?: string // heading over the results; defaults to the refresh label
   refresh?: { label: string; do: GenAction }
   map?: Record<string, string>
 }
 
 export interface GenRow {
-  // section|caption|switch|slider|text|dropdown|value|button|buttons|info|list|component
+  // section|caption|switch|slider|text|dropdown|timezone|value|button|buttons|info|list|component
+  // timezone: an IANA zone picker, form fields only. Optionless — this client
+  // builds the list from its own Intl database; placeholderKey seeds the
+  // initial selection with the currently applied zone.
   kind: string
   text?: string // section / caption
   label?: string
@@ -105,6 +119,9 @@ export interface GenRow {
   maxKey?: string
   secret?: boolean
   placeholder?: string
+  // A key holding the placeholder text, for a hint only the device knows (the
+  // MAC it would use, the port it would pick). Wins over `placeholder`.
+  placeholderKey?: string
   options?: GenOption[]
   searchable?: boolean // type-to-filter picker, for lists too long to scan
   copyable?: boolean // value rows: click-to-copy

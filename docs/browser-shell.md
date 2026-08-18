@@ -96,14 +96,23 @@ hand-written one. This is the web parallel to the firmware's generated settings
 nodes: one generic renderer, no SFC per pane.
 
 Row kinds: `section`, `caption`, `switch`, `slider`, `text` (with a write-only
-`secret` variant), `dropdown` (optionally `searchable`), `value` (read-only live
+`secret` variant), `dropdown` (optionally `searchable`), `timezone` (form
+fields only: a type-to-filter IANA zone picker whose options come from this
+client's own Intl database, never from the device — the device validates the
+submitted name against its zone DB instead), `value` (read-only live
 text, optionally `copyable`), `button`, `buttons` (several content-sized buttons
 on one line, gathered left, centre or right, each optionally gated on its own
 key), `info` (a run of value rows as one block: a shared label column sized to
 the widest label and capped at a third, and no gap between the lines), and
 `list` — a collection with an item editor, add forms, removal, reordering and
-scan-and-adopt candidates. Any row may carry `whenKey`, which shows it while a
-key is truthy. A row the build gated with `when_surface: lcd` never reaches here
+scan-and-adopt candidates. A collection's own buttons (the candidates' scan
+first, then each add) share one right-gathered line under the list, and the scan
+opens its results as a **popup** headed by the clause's `found` text, with Close
+in its top-right corner: what the device can see is a different question from
+what it is configured for, and a transient answer to it, so it gets its own
+surface rather than growing the pane under the button that asked. Opening the
+popup starts the scan and closing it stops the scan. Any row may carry `whenKey`,
+which shows it while a key is truthy. A row the build gated with `when_surface: lcd` never reaches here
 at all — the backup and restore buttons are the reverse case, `when_surface: web`,
 because the archive they move needs a browser on the other end.
 
@@ -118,7 +127,10 @@ and both are worth knowing before writing UI code here:
   pill all render exactly what the key holds. Nothing on this side formats,
   composes or compares; a gate is tested for truthiness, never equality.
 - **The firmware validates in sentinel handlers.** A form submits its fields as
-  one JSON object to a command key, and the owning task answers on the sentinel
+  one JSON object to a command key, every field a STRING (a switch as
+  `"1"`/`"0"`, a slider as its number spelled out): the owning task reads the
+  payload with one rule, and the on-device form submits the same shape, so one
+  parser serves both surfaces. The task answers on the sentinel
   family's error/ack pair — `<cmd>.error` / `<cmd>.done`, shared by all of one
   collection's sentinels and passed into the form dialog by the collection; a
   bare form defaults to `<form-cmd>.error` / `.done`. A reason on the error key

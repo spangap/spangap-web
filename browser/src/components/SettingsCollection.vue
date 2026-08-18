@@ -35,7 +35,7 @@
       </span>
 
       <SettingsAction
-        v-for="(a, i) in row.actions ?? []"
+        v-for="(a, i) in (row.actions ?? []).filter((x) => itemActionVisible(x.whenKey, withId(item)))"
         :key="i"
         :label="a.label"
         :action="a.do"
@@ -51,35 +51,58 @@
       {{ row.empty }}
     </div>
 
-    <q-btn
-      v-for="(a, i) in row.add ?? []"
-      :key="i"
-      dense no-caps outline color="primary"
-      :label="a.label"
-      @click="adding = a.form"
-    />
-
-    <!-- Candidates: what the device can see but has not adopted. -->
-    <template v-if="row.candidates">
-      <SettingsAction
-        v-if="row.candidates.refresh"
+    <!-- The collection's own buttons on one line, gathered right: scanning
+         first, because finding a thing is what you reach for before describing
+         one by hand. -->
+    <div v-if="row.candidates?.refresh || row.add?.length" class="coll-actions">
+      <q-btn
+        v-if="row.candidates?.refresh"
+        dense no-caps outline color="primary"
         :label="row.candidates.refresh.label"
-        :action="row.candidates.refresh.do"
+        @click="openScan()"
       />
-      <div
-        v-for="(c, i) in candidates"
-        :key="'c' + i"
-        class="coll-item coll-candidate"
-        @click="adopt(c)"
-      >
-        <div class="coll-text">
-          <div class="coll-title">{{ subst(row.candidates.item, c) }}</div>
-          <div v-if="row.candidates.subtitle" class="coll-sub">
-            {{ subst(row.candidates.subtitle, c) }}
-          </div>
-        </div>
-        <q-icon name="add" />
-      </div>
+      <q-btn
+        v-for="(a, i) in row.add ?? []"
+        :key="i"
+        dense no-caps outline color="primary"
+        :label="a.label"
+        @click="adding = a.form"
+      />
+    </div>
+
+    <!-- Candidates: what the device can SEE, which is a different question from
+         what it is configured for, and a transient answer to it. So they are a
+         popup rather than part of the pane — opening it starts the scan and
+         closing it stops the scan. -->
+    <template v-if="row.candidates">
+      <q-dialog :model-value="scanOpen" @update:model-value="(v) => { if (!v) closeScan() }">
+        <q-card class="coll-card">
+          <q-card-section class="scan-head">
+            <div class="scan-title">
+              {{ row.candidates.found ?? row.candidates.refresh?.label }}
+            </div>
+            <q-btn dense flat no-caps size="sm" label="Close" @click="closeScan()" />
+          </q-card-section>
+          <q-card-section class="scan-list">
+            <div v-if="!candidates.length" class="text-caption" style="opacity:0.6">
+              Scanning…
+            </div>
+            <div
+              v-for="(c, i) in candidates"
+              :key="'c' + i"
+              class="coll-item coll-candidate"
+              @click="adopt(c)"
+            >
+              <div class="coll-text">
+                <div class="coll-title">{{ subst(row.candidates.item, c) }}</div>
+                <div v-if="row.candidates.subtitle" class="coll-sub">
+                  {{ subst(row.candidates.subtitle, c) }}
+                </div>
+              </div>
+            </div>
+          </q-card-section>
+        </q-card>
+      </q-dialog>
     </template>
 
     <q-dialog v-if="removing" :model-value="true" @update:model-value="removing = null">
@@ -119,7 +142,7 @@
 import { computed, ref, watch, onUnmounted } from 'vue'
 import { useDeviceStore } from '../stores/device'
 import { useSettingsTreeStore } from '../stores/settingsTree'
-import { subst, paletteColor } from '../lib/settingsRuntime'
+import { subst, paletteColor, itemActionVisible, runSet, asItems } from '../lib/settingsRuntime'
 import type { GenRow, GenForm } from '../lib/settingsNodes'
 import PanelHeading from './PanelHeading.vue'
 import SettingsAction from './SettingsAction.vue'
@@ -136,13 +159,11 @@ const editing = ref<Item | null>(null)
 const removing = ref<Item | null>(null)
 const prefill = ref<Item | undefined>(undefined)
 const dragFrom = ref<number | null>(null)
+const scanOpen = ref(false)
 /** The order a drag put on screen, held until the array is re-published. */
 const optimistic = ref<string[] | null>(null)
 
-const items = computed<Item[]>(() => {
-  const v = device.get(props.row.k!)
-  return Array.isArray(v) ? (v as Item[]) : []
-})
+const items = computed<Item[]>(() => asItems(device.get(props.row.k!)))
 
 const ordered = computed<Item[]>(() => {
   const list = items.value
@@ -159,9 +180,7 @@ watch(items, () => { optimistic.value = null })
 
 const candidates = computed<Item[]>(() => {
   const k = props.row.candidates?.k
-  if (!k) return []
-  const v = device.get(k)
-  return Array.isArray(v) ? (v as Item[]) : []
+  return k ? asItems(device.get(k)) : []
 })
 
 /* Leaving the pane stops the scan. The refresh target is a plain key, so
@@ -175,7 +194,21 @@ function stopScanning() {
 }
 onUnmounted(stopScanning)
 const tree = useSettingsTreeStore()
-watch(() => tree.activePath, stopScanning)
+watch(() => tree.activePath, () => { scanOpen.value = false; stopScanning() })
+
+/** The scan runs for exactly as long as its popup is up. */
+function openScan() {
+  const refresh = props.row.candidates?.refresh
+  if (!refresh) return
+  scanOpen.value = true
+  if (refresh.do.set) runSet(refresh.do.set)
+}
+
+function closeScan() {
+  if (!scanOpen.value) return
+  scanOpen.value = false
+  stopScanning()
+}
 
 /** `{id}` resolves to the value of whichever field identifies an item. */
 function withId(item: Item): Item {
@@ -239,6 +272,9 @@ function adopt(c: Item) {
     for (const [k, v] of Object.entries(cand.map ?? {})) if (v === field.field) from = k
     if (c[from] !== undefined) out[field.field] = c[from]
   }
+  /* Picking one answers the question the scan asked, so the popup goes and the
+   * scan with it, and the add form opens over a clear screen. */
+  closeScan()
   prefill.value = out
   adding.value = first.form
 }
@@ -252,6 +288,17 @@ function adopt(c: Item) {
   padding: 4px 0;
   min-width: 0;
 }
+.coll-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.scan-head { display: flex; align-items: center; gap: 8px; }
+.scan-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.scan-list { max-height: 50vh; overflow-y: auto; }
 .coll-candidate { cursor: pointer; opacity: 0.85; }
 .coll-candidate:hover { opacity: 1; }
 .coll-text { flex: 1; min-width: 0; }

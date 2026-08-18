@@ -164,6 +164,24 @@ channel that delays the storage pong doesn't trip a false link-down.
 - **`registerApp` placement and `menu` placement share one comparator** — keep
   them in sync if you change the bucket rule. The settings tree does NOT use it:
   its rule is `order`-then-arrival, with no buckets and no alphabetic tier.
+- **A collection is an array OR a numeric-keyed object, and both are lists.**
+  A list the firmware seeded as `[]` in a default tree stays an array; one that
+  only ever grew from indexed writes (`s.tcp.peers.0.host`) is an object keyed
+  `"0"`, `"1"`, … , because the patch tree builds objects for every segment and
+  there was no array under it to merge into. `storageArrayCount` counts either,
+  so `asItems` in `lib/settingsRuntime` reads either. An `Array.isArray` test
+  here renders a configured device's list as empty while its display shows the
+  items.
+- **A form field goes over the wire as a string.** The dialog stringifies every
+  field on submit and a switch edits to `"1"`/`"0"`, because the sentinel
+  handlers read a JSON string or nothing at all — a number lands as an absent
+  field, and a peer's `enable` written that way silently reverts to its default.
+- **A dialog hands the caret back to whatever opened it.** The owner closes a
+  form by dropping it from the tree rather than hiding it, so the dialog library
+  never runs its own refocus. Left loose, the caret is claimed by the browser or
+  a password-manager extension, which scrolls the pane to a field nobody asked
+  for; settings inputs also carry the per-vendor ignore attributes
+  (`NO_MANAGER` in `lib/settingsRuntime`) so no vault adopts one.
 - **Never read a secret back.** Secret config keys live under `secrets.*` and are
   not in the synced storage tree; the generated secret row is write-only by design.
 - **A settings node is a node, not a leaf.** Code that assumes a settings path

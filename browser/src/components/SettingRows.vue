@@ -42,6 +42,7 @@
           autocorrect="off"
           autocapitalize="off"
           spellcheck="false"
+          v-bind="NO_MANAGER"
           @update:model-value="(v) => setSecret(row.k!, v)"
         />
       </div>
@@ -109,7 +110,7 @@
 
 <script setup lang="ts">
 import { useDeviceStore } from '../stores/device'
-import { rowVisible } from '../lib/settingsRuntime'
+import { rowVisible, NO_MANAGER } from '../lib/settingsRuntime'
 import type { GenRow } from '../lib/settingsNodes'
 import PanelHeading from './PanelHeading.vue'
 import SettingToggle from './SettingToggle.vue'

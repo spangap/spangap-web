@@ -175,13 +175,13 @@ export const useDeviceStore = defineStore('device', () => {
     }
   }
 
-  const ZONES_URL = 'https://raw.githubusercontent.com/nayarsystems/posix_tz_db/master/zones.json'
-
-  /** After first full dump, push client time + timezone + zones update if needed. */
+  /** After a full dump has landed, push client time + timezone if needed.
+   *  Only call this from the {__dump:'e'} handler: the dump streams in
+   *  chunks, and reading settings mid-dump sees whatever subtrees happen to
+   *  have merged — an undefined s.ntp.tz here would overwrite the device's
+   *  configured timezone with the browser's. */
   function pushClientInfo() {
     if (clientInfoPushed) return
-    /* Wait until we have sys.time in the dump (indicates full dump received) */
-    if (!settings.sys?.time) return
     clientInfoPushed = true
 
     /* Push epoch time if device doesn't have valid time */
@@ -192,8 +192,8 @@ export const useDeviceStore = defineStore('device', () => {
     }
 
     /* Push browser timezone if not yet configured. We send only the IANA
-     * name — the device resolves the POSIX string itself from its on-disk
-     * timezones.json (the zones map no longer lives in config). */
+     * name — the device resolves the POSIX string itself from its built-in
+     * zone table. */
     const tz = settings.s?.ntp?.tz
     if (tz === undefined || tz === '') {
       try {
@@ -201,9 +201,6 @@ export const useDeviceStore = defineStore('device', () => {
         if (ianaName) set('s.ntp.tz', ianaName)
       } catch { /* Intl not available */ }
     }
-
-    /* Update timezone zones from GitHub if stale (>3 months) */
-    updateZonesIfStale()
   }
 
   /** Tell the device a person is at this UI. The device holds several
@@ -230,52 +227,6 @@ export const useDeviceStore = defineStore('device', () => {
       humanSeen = true
       pushHuman()
     }, { capture: true, passive: true })
-  }
-
-  function updateZonesIfStale() {
-    /* The device's IANA→POSIX map is a plain file at /state/timezones.json,
-     * no longer a config subtree. We track the version we last uploaded in
-     * the tiny s.ntp.zones_etag config key (so the big map stays out of the
-     * config dump) and, when GitHub's copy is newer, PUT a fresh file. */
-    const deviceEtag = String(settings.s?.ntp?.zones_etag ?? '')
-
-    /* HEAD request to check ETag without downloading full file */
-    fetch(ZONES_URL, { method: 'HEAD', cache: 'no-cache' })
-      .then(r => {
-        if (!r.ok) return
-        const ghEtag = r.headers.get('ETag') ?? ''
-        if (!ghEtag) return
-        if (deviceEtag === ghEtag) return  /* already current */
-        /* ETag changed — download, reshape to the nested tree, PUT to device */
-        return fetch(ZONES_URL, { cache: 'no-cache' })
-          .then(r2 => r2.ok ? r2.json() : null)
-          .then(flat => {
-            if (!flat || typeof flat !== 'object') return
-            const nested: Record<string, any> = {}
-            for (const [iana, posix] of Object.entries(flat)) {
-              const parts = iana.split('/')
-              let node = nested
-              for (let i = 0; i < parts.length - 1; i++)
-                node = node[parts[i]] ??= {}
-              node[parts[parts.length - 1]] = posix
-            }
-            nested.updated = ghEtag
-            return fetch('/state/timezones.json', {
-              method: 'PUT',
-              credentials: 'same-origin',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(nested),
-            }).then(put => {
-              if (!put.ok) {
-                console.warn(`[device] timezone PUT failed (${put.status})`)
-                return
-              }
-              set('s.ntp.zones_etag', ghEtag)
-              console.log(`[device] timezone zones updated (${Object.keys(flat).length} zones)`)
-            })
-          })
-      })
-      .catch(() => { /* offline — use existing zones */ })
   }
 
   function flushPendingSets() {
@@ -355,7 +306,6 @@ export const useDeviceStore = defineStore('device', () => {
         }
         deepMerge(settings, json)
         checkBuildTime()
-        pushClientInfo()
       } catch { /* ignore non-JSON */ }
     }
 
