@@ -5,6 +5,7 @@
 
 export * from './lib/auth';
 export * from './lib/device-url';
+export * from './lib/title';
 export * from './lib/reconnect';
 export * from './lib/viewport';
 export * from './lib/windows';

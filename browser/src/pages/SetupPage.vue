@@ -55,11 +55,13 @@
 import { ref, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { authPasswd, authLogin, setSessionCookie, isAdminUnset, AUTH_OK, AUTH_SAME_AS_OTHER_REALM } from '../lib/auth'
+import { servedTitle } from '../lib/title'
 
 const router = useRouter()
-/* Project name for the heading — see LoginPage.vue: pre-auth, so sourced
-   from the per-project <title> in the consumer's index.html. */
-const appName = (document.title || 'Device').replace(/^\w/, c => c.toUpperCase())
+/* Project name for the heading — see LoginPage.vue: the per-project <title>
+   from the consumer's index.html, as captured before the device title
+   ("<host> - Web UI") takes the tab over. */
+const appName = servedTitle.replace(/^\w/, c => c.toUpperCase())
 const password = ref('')
 const confirm = ref('')
 const errorMsg = ref('')

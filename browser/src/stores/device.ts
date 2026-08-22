@@ -8,8 +8,9 @@
  * writes are sent as nested JSON patches too.
  */
 import { defineStore } from 'pinia'
-import { reactive, ref } from 'vue'
+import { reactive, ref, watchEffect } from 'vue'
 import { getSession } from '../lib/webrtc-session'
+import { setDeviceTitle } from '../lib/title'
 import { logSystemNotice } from './log'
 
 export const useDeviceStore = defineStore('device', () => {
@@ -115,6 +116,12 @@ export const useDeviceStore = defineStore('device', () => {
       dst[key] = val
     }
   }
+
+  /** The tab title follows the device: "<host> - Web UI", struck out while
+   *  the link is down. Reactive over the settings mirror and linkDown, so it
+   *  tracks a hostname rename as readily as an outage; until the first dump
+   *  lands there is no hostname and the served title stands. */
+  watchEffect(() => { setDeviceTitle(get('s.net.hostname'), linkDown.value) })
 
   /** Read a value by dot-notation path (e.g., "s.camera.img.quality"). */
   function get(path: string): any {

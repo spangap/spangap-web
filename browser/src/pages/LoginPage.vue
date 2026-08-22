@@ -42,13 +42,15 @@
 import { ref, onMounted, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import { authLogin, setSessionCookie, checkAuth, isAdminUnset, AUTH_OK, AUTH_WRONG_PASSWORD, AUTH_RATE_LIMITED } from '../lib/auth'
+import { servedTitle } from '../lib/title'
 
 const router = useRouter()
 /* Project name for the heading. This page is shown pre-auth, before the
    storage DataChannel (which carries fw.name) connects, so the only
    project-specific value available is the per-project <title> baked into
-   each consumer's index.html. */
-const appName = (document.title || 'Device').replace(/^\w/, c => c.toUpperCase())
+   each consumer's index.html — as captured before the device title
+   ("<host> - Web UI") takes the tab over. */
+const appName = servedTitle.replace(/^\w/, c => c.toUpperCase())
 const password = ref('')
 const errorMsg = ref('')
 const loading = ref(false)
