@@ -48,7 +48,7 @@ settings:
   - at:
       - { id: system }
     rows:
-      - section: "Backup & Recovery"
+      - section: "Backup & recovery"
         when_surface: web
       # One choice, two directions — so one line rather than two full-width
       # buttons. Each states the same thing about safe mode, in its own tense.
@@ -72,7 +72,7 @@ settings:
                       color: red
                       do: { set: { key: "s.sys.restore", value: 1, edge: true, reboots: true } }
         when_surface: web
-      - section: "Factory Reset"
+      - section: "Factory reset"
       # The wipe target is a choice, so it is a dialog of buttons rather than a
       # picker plus a confirm: each button states exactly what it erases.
       - button:

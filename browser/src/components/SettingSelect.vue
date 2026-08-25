@@ -1,8 +1,8 @@
 <template>
-  <div class="row items-center no-wrap">
-    <div class="col-4 text-caption">{{ label }}</div>
+  <SettingRow v-if="ready" :label="label">
     <q-select
-      class="col"
+      class="set-field set-field--fit"
+      :style="{ minWidth: fitWidth }"
       :model-value="currentVal"
       :options="shown"
       :disable="disable"
@@ -14,12 +14,14 @@
       @filter="onFilter"
       @update:model-value="onChange"
     />
-  </div>
+  </SettingRow>
 </template>
 
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useDeviceStore } from '../stores/device'
+import { useSettingsReady } from '../lib/settingsRuntime'
+import SettingRow from './SettingRow.vue'
 
 const props = defineProps<{
   label: string
@@ -30,8 +32,18 @@ const props = defineProps<{
   searchable?: boolean
 }>()
 const device = useDeviceStore()
+const ready = useSettingsReady()
 
 const currentVal = computed(() => String(device.get(props.k) ?? ''))
+
+/* Wide enough for the LONGEST option, not for whichever one is selected: a
+ * picker that resized as you chose would move every control below it. `ch` is
+ * the digit width of the face in use, which is close enough for a label and
+ * costs no measurement. The chrome (arrow, padding) is the constant. */
+const fitWidth = computed(() => {
+  const longest = props.options.reduce((n, o) => Math.max(n, o.label.length), 0)
+  return `${Math.min(longest, 40) + 5}ch`
+})
 
 const needle = ref('')
 const shown = computed(() => {

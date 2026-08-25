@@ -95,8 +95,19 @@ matching `Setting*` component — so a declared pane is visually identical to a
 hand-written one. This is the web parallel to the firmware's generated settings
 nodes: one generic renderer, no SFC per pane.
 
-Row kinds: `section`, `caption`, `switch`, `slider`, `text` (with a write-only
-`secret` variant), `dropdown` (optionally `searchable`), `timezone` (form
+Row kinds: `title` / `heading` / `section` (the three heading levels, each
+rendered at its own indent by the walk in `SettingRows.vue`), `caption`,
+`advanced` (a disclosure group), `switch`, `slider`, `integer` (a number typed
+in rather than dragged to, with an optional `-`/`+` pair snapping to multiples
+of `step`, and a warning dialog naming the range on a value outside it — refused
+rather than clamped, so nothing out of range reaches storage), `ipv4` (a dotted
+quad, checked the same way; empty is accepted and means unset, which is how a
+fixed address is handed back to DHCP). Any of those three may carry a `unit` —
+a word printed after the field, which also right-aligns and shortens it — and a
+text row may ask to be `short`. Then `text` (whose `secret` flag MASKS the
+field and offers a reveal — it is loaded and edited in place like any other, and
+there is no write-only field in this shell), `dropdown` (optionally
+`searchable`), `timezone` (form
 fields only: a type-to-filter IANA zone picker whose options come from this
 client's own Intl database, never from the device — the device validates the
 submitted name against its zone DB instead), `value` (read-only live
@@ -104,7 +115,10 @@ text, optionally `copyable`), `button`, `buttons` (several content-sized buttons
 on one line, gathered left, centre or right, each optionally gated on its own
 key), `info` (a run of value rows as one block: a shared label column sized to
 the widest label and capped at a third, and no gap between the lines), and
-`list` — a collection with an item editor, add forms, removal, reordering and
+`list` — a collection with an optional `caption` under its heading, an item
+editor, add forms, removal, drag-to-reorder (`reorder`, the row itself the
+handle here; the display starts the drag on the row's grip so a drag elsewhere
+still scrolls the pane) and
 scan-and-adopt candidates. A collection's own buttons (the candidates' scan
 first, then each add) share one right-gathered line under the list, and the scan
 opens its results as a **popup** headed by the clause's `found` text, with Close
@@ -112,7 +126,13 @@ in its top-right corner: what the device can see is a different question from
 what it is configured for, and a transient answer to it, so it gets its own
 surface rather than growing the pane under the button that asked. Opening the
 popup starts the scan and closing it stops the scan. Any row may carry `whenKey`,
-which shows it while a key is truthy. A row the build gated with `when_surface: lcd` never reaches here
+which shows it while a key is truthy. A `button` or `buttons` row starts on the
+control column, where every field on the pane starts — a button is a control. A
+`caption` renders `[label](url)` as an anchor (CaptionText.vue); the display
+keeps the label and drops the URL, having nowhere to send anybody. A caption
+directly under a heading spans both columns at the heading's indent; one under a
+field starts on the control column.
+A row the build gated with `when_surface: lcd` never reaches here
 at all — the backup and restore buttons are the reverse case, `when_surface: web`,
 because the archive they move needs a browser on the other end.
 

@@ -99,7 +99,11 @@ export interface GenCandidates {
 }
 
 export interface GenRow {
-  // section|caption|switch|slider|text|dropdown|timezone|value|button|buttons|info|list|component
+  // title|heading|section|caption|advanced|switch|slider|integer|text|dropdown|
+  // timezone|value|button|buttons|info|list|component
+  // heading: a level-1 heading above `section`; advanced: a disclosure group
+  // whose `rows` render in place when opened (pane rows bind keys, editor rows
+  // bind fields).
   // timezone: an IANA zone picker, form fields only. Optionless — this client
   // builds the list from its own Intl database; placeholderKey seeds the
   // initial selection with the currently applied zone.
@@ -112,11 +116,26 @@ export interface GenRow {
   whenKey?: string // show only while truthy; "{field}" allowed inside a form
   min?: number
   max?: number
-  // Slider bounds the device publishes. Where set, the key's value replaces the
-  // number above — a limit the firmware measured on its own hardware, which the
-  // build could not know. The number stays as the fallback until the key exists.
+  // Bounds the device publishes (slider and integer alike). Where set, the
+  // key's value replaces the number above — a limit the firmware measured on
+  // its own hardware, which the build could not know. The number stays as the
+  // fallback until the key exists.
   minKey?: string
   maxKey?: string
+  // integer — a number typed in rather than dragged to. `min`/`max` are absent
+  // where the quantity has no bound; a value outside them is refused on commit
+  // with a warning and never reaches storage. `buttons` adds a -/+ pair
+  // stepping by `step` (default 1), which SNAPS to its own multiples: at step
+  // 5, down from 23 is 20 and then 15.
+  step?: number
+  buttons?: boolean
+  // A word printed after the field — a unit ("min", "dBm") or the fixed tail of
+  // what is being entered (".duckdns.org"). Never part of the value; a field
+  // carrying one is short and right-aligned.
+  unit?: string
+  // A third of a field's usual width, for an entry that is a handful of
+  // characters. Numbers are short already.
+  short?: boolean
   secret?: boolean
   placeholder?: string
   // A key holding the placeholder text, for a hint only the device knows (the
@@ -134,13 +153,18 @@ export interface GenRow {
   // sized to the widest label but never wider than a third, and no gap between
   // the lines. Value rows only; a control needs room a narrow column cannot give.
   rows?: GenRow[]
-  // list (a collection)
+  // list (a collection). `caption` sits between the heading and the rows: what
+  // the list is, and what its order means — the rows are the device's own data
+  // and carry no room for prose.
+  caption?: string
   id?: string
   item?: string
   subtitle?: string
   status?: string
   empty?: string
-  orderable?: boolean
+  // Drag the rows into the order you want. The display starts the drag on a
+  // grip so a drag elsewhere still scrolls the pane; here the row is the handle.
+  reorder?: boolean
   cmd?: string
   add?: { label: string; form: GenForm }[]
   remove?: { confirm?: string }

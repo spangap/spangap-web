@@ -13,42 +13,65 @@
   so the list can hold an optimistic order until the re-published array lands.
 -->
 <template>
-  <div class="q-gutter-y-xs">
-    <PanelHeading v-if="row.label">{{ row.label }}</PanelHeading>
+  <div class="q-gutter-y-xs coll-block">
+    <PanelHeading v-if="row.label" :level="3">{{ row.label }}</PanelHeading>
 
-    <div
-      v-for="(item, idx) in ordered"
-      :key="String(item[row.id!] ?? idx)"
-      class="coll-item"
-      :draggable="row.orderable"
-      @dragstart="dragFrom = idx"
-      @dragover.prevent
-      @drop="drop(idx)"
-    >
-      <div class="coll-text">
-        <div class="coll-title">{{ subst(row.item, item) }}</div>
-        <div v-if="row.subtitle" class="coll-sub">{{ subst(row.subtitle, item) }}</div>
+    <!-- Between the heading and the rows: what the list is, and what its order
+         means where the order is the operator's to set. The rows themselves are
+         the device's own data and carry no room for prose. -->
+    <div v-if="row.caption" class="coll-caption"><CaptionText :text="row.caption" /></div>
+
+    <!-- The items are banded, edge to edge, exactly as the device's own lists
+         are (listRow(), lcd_settings_desc.cpp): one block of data, and a row's
+         extent visible without a rule between rows. The wrapper is what keeps
+         them touching — the gutter on the pane would otherwise part them. -->
+    <div class="coll-list">
+      <div
+        v-for="(item, idx) in ordered"
+        :key="String(item[row.id!] ?? idx)"
+        class="coll-item"
+        :class="bandClass(idx)"
+        :draggable="row.reorder"
+        @dragstart="dragFrom = idx"
+        @dragover.prevent
+        @drop="drop(idx)"
+      >
+        <!-- The grip says the row can be dragged. Here the whole row is the
+             handle; on the display the drag has to start on the grip itself,
+             or a vertical drag would scroll the pane instead. -->
+        <span v-if="row.reorder" class="coll-grip">≡</span>
+
+        <div class="coll-text">
+          <!-- The pill belongs to the name, not to the row: it says what THIS
+               item is, so it sits against the name and rides a little high on
+               it, rather than floating at the far edge of the row. -->
+          <div class="coll-title">
+            <span class="coll-title-text">{{ subst(row.item, item) }}</span>
+            <span v-if="pill(item).text" class="coll-pill" :style="{ background: pill(item).color }">
+              {{ pill(item).text }}
+            </span>
+          </div>
+          <div v-if="row.subtitle" class="coll-sub">{{ subst(row.subtitle, item) }}</div>
+        </div>
+
+        <SettingsAction
+          v-for="(a, i) in (row.actions ?? []).filter((x) => itemActionVisible(x.whenKey, withId(item)))"
+          :key="i"
+          :label="a.label"
+          :action="a.do"
+          :color="a.color"
+          :scope="withId(item)"
+        />
+
+        <q-btn v-if="row.edit?.length" dense flat round size="sm" @click="editing = item"><IconPen /></q-btn>
+        <q-btn v-if="row.remove" dense flat round size="sm" @click="askRemove(item)"><IconTrash /></q-btn>
       </div>
-
-      <span v-if="pill(item).text" class="coll-pill" :style="{ background: pill(item).color }">
-        {{ pill(item).text }}
-      </span>
-
-      <SettingsAction
-        v-for="(a, i) in (row.actions ?? []).filter((x) => itemActionVisible(x.whenKey, withId(item)))"
-        :key="i"
-        :label="a.label"
-        :action="a.do"
-        :color="a.color"
-        :scope="withId(item)"
-      />
-
-      <q-btn v-if="row.edit?.length" dense flat round size="sm" icon="edit" @click="editing = item" />
-      <q-btn v-if="row.remove" dense flat round size="sm" @click="askRemove(item)"><IconTrash /></q-btn>
     </div>
 
-    <div v-if="!ordered.length && row.empty" class="text-caption" style="opacity:0.6">
-      {{ row.empty }}
+    <!-- Empty is still a list, so it is still a banded row: the block keeps
+         its extent and its background, and the row says so in words. -->
+    <div v-if="!ordered.length" class="coll-list">
+      <div class="coll-item band-a coll-empty">{{ emptyText }}</div>
     </div>
 
     <!-- The collection's own buttons on one line, gathered right: scanning
@@ -57,14 +80,16 @@
     <div v-if="row.candidates?.refresh || row.add?.length" class="coll-actions">
       <q-btn
         v-if="row.candidates?.refresh"
-        dense no-caps outline color="primary"
+        dense no-caps unelevated
+        :style="buttonStyle()"
         :label="row.candidates.refresh.label"
         @click="openScan()"
       />
       <q-btn
         v-for="(a, i) in row.add ?? []"
         :key="i"
-        dense no-caps outline color="primary"
+        dense no-caps unelevated
+        :style="buttonStyle()"
         :label="a.label"
         @click="adding = a.form"
       />
@@ -81,22 +106,25 @@
             <div class="scan-title">
               {{ row.candidates.found ?? row.candidates.refresh?.label }}
             </div>
-            <q-btn dense flat no-caps size="sm" label="Close" @click="closeScan()" />
+            <q-btn dense no-caps unelevated size="sm" :style="buttonStyle('grey')" label="Close" @click="closeScan()" />
           </q-card-section>
           <q-card-section class="scan-list">
-            <div v-if="!candidates.length" class="text-caption" style="opacity:0.6">
+            <div v-if="!candidates.length" class="coll-empty">
               Scanning…
             </div>
-            <div
-              v-for="(c, i) in candidates"
-              :key="'c' + i"
-              class="coll-item coll-candidate"
-              @click="adopt(c)"
-            >
-              <div class="coll-text">
-                <div class="coll-title">{{ subst(row.candidates.item, c) }}</div>
-                <div v-if="row.candidates.subtitle" class="coll-sub">
-                  {{ subst(row.candidates.subtitle, c) }}
+            <div class="coll-list">
+              <div
+                v-for="(c, i) in candidates"
+                :key="'c' + i"
+                class="coll-item coll-candidate"
+                :class="bandClass(i)"
+                @click="adopt(c)"
+              >
+                <div class="coll-text">
+                  <div class="coll-title">{{ subst(row.candidates.item, c) }}</div>
+                  <div v-if="row.candidates.subtitle" class="coll-sub">
+                    {{ subst(row.candidates.subtitle, c) }}
+                  </div>
                 </div>
               </div>
             </div>
@@ -109,8 +137,8 @@
       <q-card class="coll-card">
         <q-card-section>{{ subst(row.remove?.confirm, removing) }}</q-card-section>
         <q-card-actions align="right">
-          <q-btn flat no-caps label="Cancel" @click="removing = null" />
-          <q-btn flat no-caps color="negative" label="Remove" @click="doRemove()" />
+          <q-btn dense no-caps unelevated :style="buttonStyle('grey')" label="Cancel" @click="removing = null" />
+          <q-btn dense no-caps unelevated :style="buttonStyle('red')" label="Remove" @click="doRemove()" />
         </q-card-actions>
       </q-card>
     </q-dialog>
@@ -142,11 +170,13 @@
 import { computed, ref, watch, onUnmounted } from 'vue'
 import { useDeviceStore } from '../stores/device'
 import { useSettingsTreeStore } from '../stores/settingsTree'
-import { subst, paletteColor, itemActionVisible, runSet, asItems } from '../lib/settingsRuntime'
+import { subst, paletteColor, buttonStyle, itemActionVisible, runSet, asItems } from '../lib/settingsRuntime'
 import type { GenRow, GenForm } from '../lib/settingsNodes'
 import PanelHeading from './PanelHeading.vue'
+import CaptionText from './CaptionText.vue'
 import SettingsAction from './SettingsAction.vue'
 import SettingsFormDialog from './SettingsFormDialog.vue'
+import IconPen from './IconPen.vue'
 import IconTrash from './IconTrash.vue'
 
 type Item = Record<string, unknown>
@@ -164,6 +194,11 @@ const scanOpen = ref(false)
 const optimistic = ref<string[] | null>(null)
 
 const items = computed<Item[]>(() => asItems(device.get(props.row.k!)))
+
+/** What the one banded row says when there is nothing in the list. Built here
+ *  rather than in the template so the angle brackets never reach the template
+ *  compiler. */
+const emptyText = computed(() => props.row.empty ?? '<List empty>')
 
 const ordered = computed<Item[]>(() => {
   const list = items.value
@@ -210,6 +245,11 @@ function closeScan() {
   stopScanning()
 }
 
+/** Which of the two greys a row takes. */
+function bandClass(idx: number): string {
+  return idx % 2 ? 'band-b' : 'band-a'
+}
+
 /** `{id}` resolves to the value of whichever field identifies an item. */
 function withId(item: Item): Item {
   return { ...item, id: item[props.row.id!] }
@@ -225,11 +265,16 @@ function pill(item: Item): { text: string; color: string } {
 }
 
 /** The item editor is the collection's `edit:` rows over `<cmd>.set`, so the
- *  sentinel family stays derived from the one `cmd` name. */
+ *  sentinel family stays derived from the one `cmd` name.
+ *
+ *  Titled for the ITEM, from the collection's own `item:` template — the one
+ *  place that already says how an item is titled. The collection's name over it
+ *  ("Known networks") says nothing about which one of them is being edited,
+ *  which is exactly what the heading of an editor has to say. */
 const editForm = computed<GenForm>(() => ({
   fields: props.row.edit ?? [],
   cmd: `${props.row.cmd}.set`,
-  title: props.row.label,
+  title: editing.value ? subst(props.row.item, editing.value) : props.row.label,
 }))
 
 function askRemove(item: Item) {
@@ -281,14 +326,56 @@ function adopt(c: Item) {
 </script>
 
 <style scoped>
+/* The two greys of a band, the device's own (listRow(), lcd_settings_desc.cpp):
+ * neutral against the blue-tinted chrome around them, and far enough apart to
+ * read as two shades without either looking like a selection. */
+/* The collection is a block of its own on the pane, set in from both margins
+ * so it reads as one object rather than as loose rows. */
+.coll-block {
+  margin: 4px 16px 4px 0;
+}
+/* Descriptive text, set the way a caption row is: an aside about the list. */
+.coll-caption {
+  font-size: 11px;
+  font-style: italic;
+  line-height: 1.4;
+  opacity: 0.7;
+  margin: 0 0 2px 12px;
+}
+/* The drag affordance, dim and out of the way of the name. */
+.coll-grip {
+  flex: 0 0 auto;
+  cursor: grab;
+  opacity: 0.45;
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+}
+.coll-item:active .coll-grip { cursor: grabbing; }
+.coll-list {
+  --band-a: #1e1e1e;
+  --band-b: #282828;
+  display: flex;
+  flex-direction: column;
+  /* The items step in again, from both sides: inside the collection's block,
+   * the list is a level deeper than the heading and buttons around it. */
+  margin: 0 12px;
+}
 .coll-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 0;
+  padding: 5px 8px;
   min-width: 0;
 }
-.coll-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.band-a { background: var(--band-a); }
+.band-b { background: var(--band-b); }
+.coll-empty {
+  font-size: 11px;
+  font-style: italic;
+  opacity: 0.7;
+}
+.coll-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 12px; }
 .scan-head { display: flex; align-items: center; gap: 8px; }
 .scan-title {
   flex: 1;
@@ -302,7 +389,21 @@ function adopt(c: Item) {
 .coll-candidate { cursor: pointer; opacity: 0.85; }
 .coll-candidate:hover { opacity: 1; }
 .coll-text { flex: 1; min-width: 0; }
-.coll-title { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Name and pill on one line: the name takes what it needs and ellipsizes, the
+ * pill keeps its width whatever is left. */
+.coll-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+}
+.coll-title-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .coll-sub {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
@@ -312,10 +413,16 @@ function adopt(c: Item) {
   white-space: nowrap;
 }
 .coll-pill {
-  border-radius: 6px;
-  padding: 1px 6px;
-  font-size: 11px;
+  flex: 0 0 auto;
+  border-radius: 5px;
+  padding: 0 5px;
+  font-size: 9.5px;
+  line-height: 1.5;
+  letter-spacing: 0.2px;
   color: #fff;
   white-space: nowrap;
+  /* Riding high on the name, the way a marker on a word does. */
+  position: relative;
+  top: -4px;
 }
 </style>

@@ -12,7 +12,7 @@
         class="nav-node"
         :class="{
           'nav-node--active': node.path === active,
-          'nav-node--group': kidsOf(node).length > 0,
+          'nav-node--group': kidsOf(node).length > 0 || depth === 0,
         }"
         @click="tree.open(node.path)"
       >
@@ -23,6 +23,7 @@
         class="nav-children"
         :nodes="kidsOf(node)"
         :active="active"
+        :depth="depth + 1"
       />
     </template>
   </div>
@@ -34,7 +35,14 @@ import { useSettingsTreeStore, nodeRenders, visibleChildren } from '../stores/se
 import type { SettingsNode } from '../stores/settingsTree'
 import { vFitText } from '../lib/fitText'
 
-const props = defineProps<{ nodes: SettingsNode[]; active: string | null }>()
+/* `depth` 0 is the rail's top level: a top-level node is a bold group header
+ * whether or not it has children — System with no submenus reads the same as
+ * the groups around it. */
+const props = withDefaults(
+  defineProps<{ nodes: SettingsNode[]; active: string | null; depth?: number }>(),
+  { depth: 0 },
+)
+const depth = props.depth
 const tree = useSettingsTreeStore()
 
 /* A menu nobody has contributed to is a name, not a destination — it stays out
@@ -64,8 +72,6 @@ const kidsOf = visibleChildren
 .nav-node--group {
   font-size: 18px;
   font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
   color: #fff;
   margin: 26px 0 2px;
 }

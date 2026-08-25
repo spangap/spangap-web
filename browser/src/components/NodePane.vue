@@ -11,7 +11,10 @@
 -->
 <template>
   <div class="q-gutter-y-md">
-    <SettingRows :rows="node.rows" />
+    <!-- Keyed by the node: switching panes builds the new one's rows rather
+         than patching them over the old one's, so nothing is ever seen holding
+         the value that belonged to the pane before it. -->
+    <SettingRows :key="node.path" :rows="node.rows" />
 
     <div v-if="kids.length" class="node-children">
       <div

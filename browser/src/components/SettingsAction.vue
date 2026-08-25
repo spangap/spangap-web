@@ -8,14 +8,10 @@
   and no special case for "confirm then do".
 -->
 <template>
-  <!-- A coloured button is filled with the palette colour, the way a pill is;
-       an uncoloured one keeps the outline every other button has. -->
+  <!-- Filled with the palette colour, the way a pill is — see buttonStyle(). -->
   <q-btn
-    dense no-caps
-    :outline="!color"
-    :unelevated="!!color"
-    :color="color ? undefined : 'primary'"
-    :style="color ? { backgroundColor: paletteColor(color), color: '#fff' } : undefined"
+    dense no-caps unelevated
+    :style="buttonStyle(color)"
     :label="label"
     @click="run(action)"
   />
@@ -27,8 +23,9 @@
         <q-btn
           v-for="(b, i) in dialog.buttons"
           :key="i"
-          flat no-caps
-          :style="b.color ? { color: paletteColor(b.color) } : undefined"
+          dense no-caps unelevated
+          class="action-choice"
+          :style="buttonStyle(b.color)"
           :label="b.label"
           @click="pick(b)"
         />
@@ -46,7 +43,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { subst, runSet, paletteColor } from '../lib/settingsRuntime'
+import { subst, runSet, buttonStyle } from '../lib/settingsRuntime'
 import type { GenAction, GenDialog, GenDialogButton, GenForm } from '../lib/settingsNodes'
 import SettingsFormDialog from './SettingsFormDialog.vue'
 
@@ -78,4 +75,6 @@ function pick(b: GenDialogButton) {
 
 <style scoped>
 .action-card { min-width: 300px; max-width: 90vw; }
+/* Stacked choices: each is a button in its own right, not a line of text. */
+.action-choice { margin: 4px 0 0; padding: 4px 12px; }
 </style>
