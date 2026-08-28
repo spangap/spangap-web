@@ -5,6 +5,16 @@
  *
  * Bidirectional: console.log/info/warn/error/debug are also forwarded to the
  * device's log task so cron/file/serial fan-out captures browser output.
+ *
+ * WHAT THE BROWSER MAY COST THE DEVICE. Everything forwarded is bounded, in
+ * three places and for three different reasons: each line is clamped to one
+ * line and a few trace frames (a Vue component trace is kilobytes of nothing a
+ * device log needs), repeats are counted rather than sent (a broken render
+ * emits on every update), and sendLogLine caps the wire form in BYTES as a
+ * backstop no caller can bypass. The device's log task receives a line on a
+ * stack; an unbounded browser is how that stack overflows. None of it loses
+ * anything: the console hook calls the real console first, so devtools always
+ * holds the untruncated original.
  */
 import { ref } from 'vue'
 import { getSession } from '../lib/webrtc-session'
@@ -134,7 +144,32 @@ export function subscribeLog(cb: (text: string) => void): () => void {
 /** Send a preformatted line to the device log. Adds a trailing newline if
  *  missing. If the DC isn't open yet (early boot, reconnect), the line is
  *  queued and flushed when the channel opens. Bounded queue. */
+/* The hard bound on what any browser line may cost the device, in BYTES on the
+ * wire — the unit the receiving log task actually spends, and not the same as
+ * characters: one `⏎` is three bytes, so a length check in characters can be
+ * out by 4×. Enforced HERE rather than only at the formatters because this is
+ * the single door to the device, and it is exported — a caller added later
+ * inherits the bound instead of having to remember it. */
+const WIRE_MAX = 512
+
+const utf8 = new TextEncoder()
+
+/** Truncate to `max` UTF-8 bytes without splitting a character, and without
+ *  leaving the terminal wearing a colour: an ANSI line is re-terminated. */
+function clampWire(line: string, max: number): string {
+  const bytes = utf8.encode(line)
+  if (bytes.length <= max) return line
+  const hadAnsi = line.includes('\x1b[')
+  const tail = hadAnsi ? '…\x1b[0m' : '…'
+  const room = max - utf8.encode(tail).length
+  /* Decoding a slice that ends mid-sequence yields U+FFFD; drop it rather than
+   * ship a broken character. */
+  const cut = new TextDecoder('utf-8').decode(bytes.subarray(0, room)).replace(/�+$/, '')
+  return cut + tail
+}
+
 export function sendLogLine(line: string) {
+  line = clampWire(line, WIRE_MAX - 1)      // -1 for the newline below
   if (!line.endsWith('\n')) line += '\n'
   if (dc && dc.readyState === 'open') {
     try { dc.send(line) } catch { /* drop */ }
@@ -165,14 +200,68 @@ function stringifyArg(a: any): string {
   try { return JSON.stringify(a) } catch { return String(a) }
 }
 
+/* ── what a browser line may cost the device ──
+ *
+ * A forwarded line arrives at the device's log task as ONE line, on a task with
+ * a stack rather than a heap to receive it on. Browser diagnostics do not
+ * respect that at all: a Vue component trace or a JS stack is kilobytes across
+ * dozens of lines, and a broken render emits it again on every update — which
+ * is how one bad panel becomes a stack overflow in the device's log task.
+ *
+ * So the forwarder states what a line may cost. The FULL text is never lost:
+ * the console hook calls the real console first, so devtools always has the
+ * untruncated original. What is bounded is only what travels. */
+const LINE_MAX = 400      // bytes of body; a device log line, not an essay
+const TRACE_LINES = 3     // stack/component-trace lines kept — enough to place a fault
+const DEDUPE_MS = 3000    // a repeat inside this window is counted, not sent
+
+/** One line, bounded, with the tail of any trace summarised rather than sent.
+ *  The first few frames are kept because they are what places a fault; the
+ *  remaining forty are what floods the wire. */
+function clampBody(s: string): string {
+  const lines = s.split('\n')
+  const keep = lines.slice(0, 1 + TRACE_LINES).map(l => l.trim()).filter(Boolean)
+  let out = keep.join(' ⏎ ')
+  const dropped = lines.length - (1 + TRACE_LINES)
+  if (dropped > 0) out += ` ⏎ …+${dropped} more`
+  if (out.length > LINE_MAX) out = out.slice(0, LINE_MAX - 1) + '…'
+  return out
+}
+
+/* Repeat suppression. A render that throws does it once per update, so the
+ * interesting thing is that it happened and how often — not forty identical
+ * copies of it. The count is flushed by the next line that differs, which is
+ * also the line that gives it context. */
+let lastBody = ''
+let lastAt = 0
+let repeats = 0
+
+/** Returns the body to send, or null to drop it as a repeat. */
+function dedupe(body: string): string | null {
+  const now = Date.now()
+  if (body === lastBody && now - lastAt < DEDUPE_MS) {
+    repeats++
+    lastAt = now
+    return null
+  }
+  const held = repeats
+  lastBody = body
+  lastAt = now
+  repeats = 0
+  return held > 0 ? `(last line repeated ${held}×) ${body}` : body
+}
+
 /* Pre-colored line: grey timestamp + level-colored body. Device's
  * containsAnsi() check sees the escapes and passes through to ANSI consumers
  * unchanged; plain consumers + log file get a stripped version. */
-function formatLine(level: string, args: any[]): string {
+function composeLine(level: string, body: string): string {
   const ts = fmtTs()
-  const body = `${level} Browser: ${args.map(stringifyArg).join(' ')}`
   const c = LEVEL_COLOR[level] ?? LEVEL_COLOR.I
-  return `\x1b[${TS_COLOR}m${ts}\x1b[0m \x1b[${c}m${body}\x1b[0m`
+  return `\x1b[${TS_COLOR}m${ts}\x1b[0m \x1b[${c}m${level} Browser: ${body}\x1b[0m`
+}
+
+function formatLine(level: string, args: any[]): string {
+  return composeLine(level, clampBody(args.map(stringifyArg).join(' ')))
 }
 
 /** Emit a one-off system notice (e.g. link down/up) through the same path as
@@ -205,7 +294,12 @@ export function installConsoleHooks() {
     debug: console.debug.bind(console),
   }
   function emit(level: string, args: any[]) {
-    const line = formatLine(level, args)
+    /* Deduplicated on the BODY, so a repeat is recognised whatever second it
+     * happened in. Dropped here rather than in formatLine: a system notice is
+     * rare and deliberate, and should never be swallowed as a repeat. */
+    const body = dedupe(clampBody(args.map(stringifyArg).join(' ')))
+    if (body === null) return
+    const line = composeLine(level, body)
     /* Local echo: appears in the LogWindow without device round-trip
      * (device-side fan-out skips the source slot, so this line wouldn't
      * come back to us anyway). */
