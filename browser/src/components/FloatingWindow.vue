@@ -50,8 +50,15 @@
 </template>
 
 <script lang="ts">
-/* Shared z-counter across all FloatingWindow instances */
+/* Shared z-counter across all FloatingWindow instances. Every raise takes the
+ * next value off it, so a window's counter value IS its place in the stack —
+ * which is why that value (not the composed z-index) is what persists. */
 let zCounter = 1000
+/* Which window currently holds the top of the counter. Pressing the front-most
+ * window again must not mint a rank: the order is already right, and burning a
+ * rank per click would march the counter toward the reserved band and rewrite
+ * the persisted stack for no visible effect. */
+let zTopId = ''
 /* Chromeless windows are pinned above every normal window. They still stack
  * among themselves off this same counter, just lifted into a reserved band. */
 const ON_TOP_Z = 2_000_000
@@ -129,15 +136,28 @@ const shown = computed(() =>
 /* Vertical resize is meaningless when the height tracks content. */
 const vResize = computed(() => props.canResizeV && !props.autoHeight)
 
-/* ── z-order ── */
-const zIndex = ref(zCounter)
+/* ── z-order ──
+ * The rank is the raw counter value and is what the stored record carries; the
+ * chromeless on-top band is added at paint time instead of being baked in,
+ * because `chromeless` is a live prop a panel flips as its layout collapses —
+ * a stored number with the band already in it would bring the window back into
+ * the wrong band whenever it was restored in the other mode. */
+const zRank = ref(zCounter)
+const zIndex = computed(() => (props.chromeless ? ON_TOP_Z : 0) + zRank.value)
+
 function bringToFront() {
-  const base = props.chromeless ? ON_TOP_Z : 0
-  zIndex.value = base + ++zCounter
+  if (zTopId !== props.id) {
+    zTopId = props.id
+    zRank.value = ++zCounter
+    saveState()               /* the new order is part of the persisted layout */
+  }
+  /* Re-report even when the rank stood still: a chromeless flip changes the
+   * composed z without touching the rank, and the manager mirrors composed z. */
   setWindowZ(props.id, zIndex.value)
 }
-/* Re-assert the pin whenever chromeless flips (into the on-top band on
- * collapse, back down to a normal raise on expand). */
+/* The band follows the prop on its own; the raise is what a flip adds — a panel
+ * that collapses to its chromeless tile, or expands back, is the window the user
+ * is working in, so it comes forward within whichever band it lands in. */
 watch(() => props.chromeless, () => bringToFront())
 
 /* ── click-to-focus swallowing ──
@@ -203,8 +223,10 @@ const bodySize = reactive({ w: 0, h: 0 })
 let resizeObserver: ResizeObserver | null = null
 
 /* ── persistence ──
- * The stored record is the window's geometry plus the user's intent to have it
- * open, and it is the whole of what a page load restores. `visible` therefore
+ * The stored record is the window's geometry, its place in the stack, and the
+ * user's intent to have it open, and it is the whole of what a page load
+ * restores — one key per window, so nothing has to agree with anything else
+ * and a window that is never mounted simply never takes part. `visible`
  * only ever moves for a reason the user would recognise (the close dot, a dock
  * launch, an app deliberately dismissing its own window) — a window whose
  * content depends on a live link must ride out a link drop rather than lower
@@ -214,8 +236,16 @@ const STORAGE_KEY = `spangap.win.${props.id}`
  * chosen size and only auto-sizes a window that has never been placed. */
 let hadStored = false
 
+/* Armed while the restore's own `update:visible` is still travelling out to the
+ * owning ref and back in as a prop change. Coming back is not opening: raising
+ * on that echo would renumber every restored window in mount order and throw
+ * away the stack the reload exists to bring back. */
+let restoringVisible = false
+
 interface StoredState {
   x: number; y: number; w: number; h: number
+  /** Raise-counter rank — see the z-order section. */
+  z: number
   visible: boolean
 }
 
@@ -229,8 +259,22 @@ function loadState(): void {
       if (typeof s.y === 'number') pctY.value = s.y
       if (typeof s.w === 'number') pctW.value = s.w
       if (typeof s.h === 'number') pctH.value = s.h
+      /* Stacking. Only the ordering between ranks matters, so windows restore
+       * independently: one that has never been opened has no rank and keeps the
+       * default, and a key belonging to a window that no longer exists is never
+       * read by anyone. A rank at or above the reserved band is not one this
+       * code minted — taking it would pin the window above every chromeless
+       * panel for good, so leave such a record's stacking at the default. */
+      if (typeof s.z === 'number' && s.z > 0 && s.z < ON_TOP_Z) {
+        zRank.value = s.z
+        /* Keep the counter ahead of every restored rank, so the first genuine
+         * raise still lands in front of the whole restored stack. */
+        if (s.z >= zCounter) { zCounter = s.z; zTopId = props.id }
+        setWindowZ(props.id, zIndex.value)
+      }
       if (typeof s.visible === 'boolean' && s.visible !== props.visible) {
         emit('update:visible', s.visible)
+        restoringVisible = s.visible
       }
     }
     /* Unknown legacy fields (dock/dockSize from the removed docking feature)
@@ -252,6 +296,7 @@ function saveState(): void {
     y: Math.round(pctY.value * 10) / 10,
     w: Math.round(pctW.value * 10) / 10,
     h: Math.round(pctH.value * 10) / 10,
+    z: zRank.value,
     visible: props.visible,
   }
   if (saveTimer) clearTimeout(saveTimer)
@@ -469,6 +514,9 @@ onMounted(() => {
   setWindowVisible(props.id, props.visible)
   loadState()
   clamp()
+  /* Watchers queued by the restore have all run by the time a nextTick callback
+   * fires, so the echo is over: any later open is a real one and must raise. */
+  nextTick(() => { restoringVisible = false })
 
   resizeObserver = new ResizeObserver(() => {
     const el = bodyRef.value
@@ -501,6 +549,10 @@ onUnmounted(() => {
   if (saveTimer) { clearTimeout(saveTimer); saveTimer = null }
   pendingSave = null
   if (flashTimer) { clearTimeout(flashTimer); flashTimer = null }
+  /* Release the top-of-counter claim: an id that comes back (a per-instance
+   * window reopened) restores whatever rank it had, and a stale claim would
+   * make the first click on it a no-op instead of a raise. */
+  if (zTopId === props.id) zTopId = ''
   unregisterWindow(props.id)
 })
 
@@ -515,10 +567,13 @@ watch(() => windowFocusReq(props.id), () => { if (props.visible) bringToFront() 
 
 watch(() => props.visible, (vis) => {
   setWindowVisible(props.id, vis)
-  if (vis) {
-    bringToFront()
-    clamp()
-  }
+  if (!vis) return
+  clamp()
+  /* Opening a window puts it in front — except when this is the restore's own
+   * echo, where the window is being put back exactly where the user left it,
+   * stacking included. */
+  if (restoringVisible) { restoringVisible = false; return }
+  bringToFront()
 })
 </script>
 

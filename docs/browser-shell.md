@@ -303,10 +303,24 @@ shipped login and first-run onboarding pages; wire them into the app router.
 ## Floating windows
 
 `FloatingWindow.vue` is the generic draggable / resizable shell behind the log,
-terminal, and editor windows. Per-window geometry and visibility persist in
-`localStorage` under `spangap.win.<id>`, and that record is the whole of what a
-page load restores. It is pointer-event driven (`touch-action: none` so phones
-don't hijack the gesture as scroll).
+terminal, and editor windows. Per-window geometry, stacking and visibility
+persist in `localStorage` under `spangap.win.<id>`, and that record is the whole
+of what a page load restores. It is pointer-event driven (`touch-action: none`
+so phones don't hijack the gesture as scroll).
+
+**Stacking persists per window, as a rank.** Every raise takes the next value
+off one counter shared by all windows, and that value — not the composed
+z-index — is the record's `z`, so a reload, a reboot or a reconnect brings the
+desktop back in the order the user left it. Only the ordering between ranks
+matters, which is what keeps the scheme from needing any agreement between
+windows: a window with no stored rank (never opened) takes the default, a key
+left behind by a window that no longer exists is read by nobody, and the counter
+is lifted above every rank a restore hands back so the next raise still lands in
+front. Chromeless windows keep their pin above all normal windows because the
+reserved band is added when the z-index is painted, never stored. Restoring an
+open window deliberately does *not* raise it — being put back is not being
+opened, and raising on restore would renumber the whole desktop into mount
+order.
 
 **The persisted `visible` flag is user intent.** It moves only for something the
 user would recognise as opening or closing the window — the close dot, a dock
