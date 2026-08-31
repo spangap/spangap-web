@@ -193,7 +193,12 @@ function buildChannel(pc: RTCPeerConnection) {
   dc.binaryType = 'arraybuffer'
   dc.onopen = () => {
     atBottom = true
-    term?.clear()
+    /* reset(), not clear(): clear() retains the cursor's physical row, and the
+     * device opens an ANSI CLI channel by writing its prompt with no leading
+     * CRLF — so the new prompt would land on the retained one and the row would
+     * grow by a prompt per reconnect. reset() also drops any half-set
+     * attributes / scroll region left behind by the dead session. */
+    term?.reset()
     wasConnected = true
     dcEpoch = getSession().epoch
     flushPending()   // send any key pressed while the channel was opening
