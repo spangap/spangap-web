@@ -1065,7 +1065,18 @@ static void handleUdpPacket(const uint8_t* buf, size_t n,
                    ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             char errbuf[128];
             mbedtls_strerror(ret, errbuf, sizeof(errbuf));
-            err("DTLS handshake: -0x%04x %s\n", -ret, errbuf);
+            /* An unexpected message is the normal cost of a handshake carried
+             * over ICE: the browser probes every candidate pair it has, so
+             * records arrive duplicated, reordered, and from paths this session
+             * has already moved on from, and each one lands mid-flight in a
+             * state machine that wanted the next record of the current flight.
+             * The session reset below is the recovery, and it works — the
+             * handshake that follows completes. Only the codes that are NOT
+             * self-healing are worth a line at error. */
+            if (ret == MBEDTLS_ERR_SSL_UNEXPECTED_MESSAGE)
+                dbg("DTLS handshake: -0x%04x %s\n", -ret, errbuf);
+            else
+                err("DTLS handshake: -0x%04x %s\n", -ret, errbuf);
             mbedtls_ssl_session_reset(&dtls);
         }
     } else {
