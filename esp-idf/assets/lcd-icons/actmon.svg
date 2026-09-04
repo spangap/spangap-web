@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none"
      stroke="#eef3f8" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
   <!-- A speedometer: gauge arc, needle, hub -->
-  <path d="M16 52 A20 20 0 1 1 48 52"/>
-  <line x1="32" y1="40" x2="42" y2="26"/>
-  <circle cx="32" cy="40" r="2.5"/>
+  <path d="M14.4 50.2 A22 22 0 1 1 49.6 50.2"/>
+  <line x1="32" y1="37" x2="43" y2="21.6"/>
+  <circle cx="32" cy="37" r="2.8"/>
 </svg>
