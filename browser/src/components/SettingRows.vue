@@ -17,7 +17,7 @@
        value this pane's key holds — which reads as arriving on the page having
        just changed the setting. A key of its own makes it a different control,
        so it mounts already showing the truth. -->
-  <template v-for="({ row, indent, wide }, i) in shown" :key="rowKey(row, i)">
+  <template v-for="({ row, indent, wide, key }) in shown" :key="key">
     <!-- The three heading levels. Each renders at its own indent (below), and
          what follows it is indented by the walk that produced these. -->
     <PanelHeading v-if="row.kind === 'title'" :level="1" :style="pad(indent)">{{ row.text }}</PanelHeading>
@@ -34,11 +34,11 @@
     <!-- A disclosure group: one full-width button; open, its rows render in
          place through this same component, storage-bound like any pane row. -->
     <div v-if="row.kind === 'advanced'" class="adv-group">
-      <div class="adv-btn" @click="toggleAdv(rowKey(row, i))">
+      <div class="adv-btn" @click="toggleAdv(key)">
         <span>{{ row.label ?? 'Advanced Settings' }}</span>
-        <span class="adv-chev">{{ advOpen[rowKey(row, i)] ? '▾' : '▸' }}</span>
+        <span class="adv-chev">{{ advOpen[key] ? '▾' : '▸' }}</span>
       </div>
-      <div v-if="advOpen[rowKey(row, i)]" class="adv-body q-gutter-y-sm">
+      <div v-if="advOpen[key]" class="adv-body q-gutter-y-sm">
         <SettingRows :rows="row.rows ?? []" />
       </div>
     </div>
@@ -189,7 +189,7 @@ function pad(level: number) {
  * is where ordinary rows sit. A description goes one step deeper than the rows
  * it sits among, so it reads as an aside about them. */
 const ready = useSettingsReady()
-const shown = computed<{ row: GenRow; indent: number; wide: boolean }[]>(() => {
+const shown = computed<{ row: GenRow; indent: number; wide: boolean; key: string }[]>(() => {
   if (!ready.value) return []
   let base = 0
   let content = 0
@@ -198,7 +198,19 @@ const shown = computed<{ row: GenRow; indent: number; wide: boolean }[]>(() => {
    * a field is about that field, so it starts on the control column. Which of
    * the two it is depends on what came before it — a walk, like the indent. */
   let afterHeading = false
-  return props.rows.filter(visible).map((row) => {
+  /* Every straddle contributing at one path concatenates into ONE row block, so
+   * identity alone does not distinguish rows: three interfaces each offer a
+   * keyless "Announce now" button and an "Announces" section. Counting the
+   * occurrences of an identity makes the second one a different row. The count
+   * runs over every row rather than the visible ones, so a row's key does not
+   * change as a gate above it opens and its control is not remounted. */
+  const seen = new Map<string, number>()
+  const out: { row: GenRow; indent: number; wide: boolean; key: string }[] = []
+  for (const row of props.rows) {
+    const id = rowKey(row)
+    const n = seen.get(id) ?? 0
+    seen.set(id, n + 1)
+    if (!visible(row)) continue
     let indent = content
     const wide = row.kind === 'caption' && afterHeading
     afterHeading = row.kind === 'title' || row.kind === 'heading'
@@ -215,8 +227,9 @@ const shown = computed<{ row: GenRow; indent: number; wide: boolean }[]>(() => {
       indent = base
       content = base + 1
     }
-    return { row, indent, wide }
-  })
+    out.push({ row, indent, wide, key: n ? `${id}#${n}` : id })
+  }
+  return out
 })
 
 const JUSTIFY = { left: 'flex-start', center: 'center', right: 'flex-end' } as const
@@ -231,9 +244,10 @@ function visible(row: GenRow): boolean {
 }
 
 /** What makes this row itself: its storage key where it binds one, its text
- *  where it is furniture, and the position only as a last resort. */
-function rowKey(row: GenRow, i: number): string {
-  return `${row.kind}:${row.k ?? row.label ?? row.text ?? i}`
+ *  where it is furniture. Rows sharing an identity are told apart by their
+ *  occurrence in the block, above — never by position in the whole list. */
+function rowKey(row: GenRow): string {
+  return `${row.kind}:${row.k ?? row.label ?? row.text ?? ''}`
 }
 
 /* A slider bound the device publishes, falling back to the compiled one until

@@ -118,6 +118,17 @@ fragment per node. Nothing here concatenates blocks or de-duplicates a heading;
 `contribute()` appending is only for the hand-written contributions that arrive
 after the generated ones.
 
+One assembled block therefore holds rows that look alike: the interfaces pane
+carries three keyless `Announce now` buttons and three `Announces` sections, one
+per interface straddle. So a row's `v-for` key is its identity (kind plus
+storage key, else label or text) PLUS its occurrence count within the block —
+identity alone collides, and Vue duplicates nodes when it patches a list with
+repeated keys, which is what a gate opening does. The count runs over every row
+rather than the visible ones, so opening a gate does not renumber the rows below
+it and remount their controls. Position alone is not the key either: two nodes
+both opening with a switch would have one pane's control patched into the
+other's, animating from a value that was never this pane's.
+
 `SettingsAction.vue` fronts the three action kinds — a `set` write, a dialog
 whose buttons nest further actions, or a form. `SettingsFormDialog.vue` holds its
 field values locally and reaches the device only on submit, which is what makes
