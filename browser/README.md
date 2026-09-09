@@ -81,30 +81,9 @@ import 'spangap-browser/modules/editor';
 import LoginPage from 'spangap-browser/pages/LoginPage.vue';
 import SetupPage from 'spangap-browser/pages/SetupPage.vue';
 
-// dev-server plugins — for quasar.config.ts, not for the app bundle
-import { workspaceMounts } from 'spangap-browser/vite/workspace-mounts';
+// dev-server plugin — for quasar.config.ts, not for the app bundle
 import { linkedDepsHmr } from 'spangap-browser/vite/linked-deps-hmr';
 ```
-
-`workspaceMounts` serves directories of the spangap workspace as extra dev-server
-paths, so a page that expects them beside itself in production finds them there
-under `spangap dev` too. Vite has one static root, so extra trees can only be
-middleware; the mounts register in `configureServer`, ahead of Vite's own static
-and transform middlewares, or the request would resolve as an app asset first.
-
-```typescript
-build: {
-  vitePlugins: [
-    [workspaceMounts, { '/flashmon': 'flashmon/flashmon', '/builds': 'builds' }],
-  ],
-}
-```
-
-Paths are workspace-relative (`SPANGAP_WORKSPACE`, which `spangap dev` sets) or
-absolute. A mount whose directory isn't there is skipped with a warning, so a
-bare `quasar dev` outside a workspace still starts — minus those paths. Dev only:
-the plugin declares no build hooks, and in production whatever serves the app
-serves these too.
 
 `linkedDepsHmr` is what makes an edit to a linked package — every straddle
 browser half — reach the browser live. It takes no options:
