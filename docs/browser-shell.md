@@ -146,13 +146,13 @@ and both are worth knowing before writing UI code here:
 - **The firmware publishes finished strings.** A value row, a subtitle, a status
   pill all render exactly what the key holds. Nothing on this side formats,
   composes or compares; a gate is tested for truthiness, never equality.
-- **The firmware validates in sentinel handlers.** A form submits its fields as
+- **The firmware validates in command key handlers.** A form submits its fields as
   one JSON object to a command key, every field a STRING (a switch as
   `"1"`/`"0"`, a slider as its number spelled out): the owning task reads the
   payload with one rule, and the on-device form submits the same shape, so one
-  parser serves both surfaces. The task answers on the sentinel
+  parser serves both surfaces. The task answers on the command key
   family's error/ack pair — `<cmd>.error` / `<cmd>.done`, shared by all of one
-  collection's sentinels and passed into the form dialog by the collection; a
+  collection's command keys and passed into the form dialog by the collection; a
   bare form defaults to `<form-cmd>.error` / `.done`. A reason on the error key
   keeps the dialog open showing it; the ack key moving closes it (an edit that
   changes nothing still acks). The dialog clears the error key just before each
@@ -164,7 +164,7 @@ A **button** runs an action: `set` (write a key, optionally `edge` to force a
 change past the storage actor's dedup, or `reboots` to run the shared
 reboot-wait behaviour in `lib/reboot.ts`), `dialog` (a confirmation or choice
 with no input fields, whose buttons nest further actions), or `form` (the one
-dialog with inputs, because it fronts a sentinel). Any button — a row's, one of
+dialog with inputs, because it fronts a command key). Any button — a row's, one of
 a `buttons:` line's, a dialog's, a collection item's — may state a `color` from
 the palette a status pill uses (`red`, `green`, `amber`, `blue`, `grey`, or an
 explicit `rrggbb`, all resolved by `paletteColor` in `lib/settingsRuntime`). A

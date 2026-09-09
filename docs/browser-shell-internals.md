@@ -184,7 +184,7 @@ channel that delays the storage pong doesn't trip a false link-down.
   here renders a configured device's list as empty while its display shows the
   items.
 - **A form field goes over the wire as a string.** The dialog stringifies every
-  field on submit and a switch edits to `"1"`/`"0"`, because the sentinel
+  field on submit and a switch edits to `"1"`/`"0"`, because the command key
   handlers read a JSON string or nothing at all — a number lands as an absent
   field, and a peer's `enable` written that way silently reverts to its default.
 - **A dialog hands the caret back to whatever opened it.** The owner closes a
@@ -198,7 +198,7 @@ channel that delays the storage pong doesn't trip a false link-down.
 - **A settings node is a node, not a leaf.** Code that assumes a settings path
   ends at something rendered, or that a node with children has no rows of its
   own, is wrong on both counts.
-- **The firmware publishes finished strings, and validates in sentinel
+- **The firmware publishes finished strings, and validates in command key
   handlers.** Neither convention is decoration: they are what let a static
   descriptor describe a whole pane. Adding formatting, comparison or client-side
   validation here puts the same logic on two surfaces again, which is the
