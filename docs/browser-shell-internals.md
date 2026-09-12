@@ -16,8 +16,10 @@ The npm package `spangap-browser`, exported via subpath imports
 `lib/settingsNodes` are reached by subpath, not the root. It ships TypeScript/Vue source — the consumer's Vite/Quasar pipeline
 compiles it. The shell pieces:
 
-- **`lib/apps.ts`** — the Dock app registry (`registerApp`, `sortedApps`) and the
-  bundled icon registry (`registerAppIcons`, `appIconSvg`).
+- **`lib/apps.ts`** — the Dock app registry (`registerApp`, `sortedApps`), the
+  image's app order (`registerAppOrder`, fed by the generated `straddles.gen.ts`
+  from the buildable's `app_order:`) and the bundled icon registry
+  (`registerAppIcons`, `appIconSvg`).
 - **`stores/menu.ts`** — `useMenuStore`: the path-based menu-bar registry
   (`advanced/…`, `app/…`). A `settings/…` path is forwarded to the tree store.
 - **`stores/settingsTree.ts`** — `useSettingsTreeStore`: the settings tree, whose
@@ -73,7 +75,9 @@ registrations. Re-registering the same leaf path updates in place. A leaf is
 
 `placement` (default 0) buckets siblings: `>0` first ascending, `0` middle
 alphabetic, `<0` last ascending — `placeRank`/`byPlacement` implement it, and the
-Dock's `sortedApps` mirrors the same comparator. `setMenu(path, opts)` overrides a
+Dock's `sortedApps` mirrors the same comparator *under* the image's app order,
+which ranks first for any app it names (`orderRank`, matching an entry against an
+app's id, label or icon, case-insensitively). `setMenu(path, opts)` overrides a
 container's label/placement/hidden. `unregister` removes a leaf or subtree and
 prunes containers (and the group) left empty. `activePanel` + `activePanelComponent`
 drive the rendered pane; `hidden` leaves are openable by id but not listed (e.g.

@@ -43,6 +43,16 @@ registerApp({
 })
 ```
 
+**The image's order comes first.** The straddle being built states one app order
+for the whole device (`app_order:` in its straddle.yaml); the build hands it to
+the Dock as `registerAppOrder()` in the generated `straddles.gen.ts` and to the
+panel's launcher as `CONFIG_LCD_LAUNCHER_ORDER`, so both surfaces offer the apps
+the same way. The Dock sorts the apps that list names first, in its order; an app
+it doesn't name follows, by `placement` as below. An entry matches an app by its
+`id`, `label` or `icon`, case-insensitively — the two surfaces don't always label
+an app identically — and an entry naming nothing here is ignored, which is what
+lets one list also carry the apps that exist only on the panel.
+
 The Dock renders one icon per app, sorted by `placement`. Clicking calls the
 app's `open()` (which raises/shows its `FloatingWindow` via the straddle's own
 visibility/focus refs). Icons are inline SVGs bundled into `app.js` by the

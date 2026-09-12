@@ -149,7 +149,9 @@ staged straddle automatically.
   COLLECTION: things the operator configures, like known networks or TCP peers.
   Settings rows and status readouts are not a list of things and are not banded.
 - **Register an app** for the Dock with `registerApp({ id, label, icon, open,
-  isOpen?, placement? })` from `lib/apps`.
+  isOpen?, placement? })` from `lib/apps`. `placement` only orders an app the
+  image's own `app_order:` doesn't name — that list, which the panel's launcher
+  reads too, comes first.
 - **Register a settings pane** with `useMenuStore().register('settings/<group>/<leaf>',
   label, { type: 'panel', component })`; or let the build generate it from a
   straddle.yaml `settings:` block via `registerSettingsNodes`.

@@ -52,14 +52,46 @@ export function appIconSvg(name: string): string | undefined {
   return iconSvgs.get(name)
 }
 
+/* ── The image's app order ──
+ * The straddle being built states one order for the whole device (straddle.yaml
+ * `app_order:`); the generated straddles.gen.ts hands it over here, and the
+ * firmware gets the same list as CONFIG_LCD_LAUNCHER_ORDER — so the Dock and the
+ * panel's launcher grid offer the apps in the same order.
+ *
+ * An entry names an app by ANY name this surface knows it by — id, label or icon
+ * basename, case-insensitively — because the two surfaces don't always label an
+ * app identically, and one token has to reach both. A name for an app this image
+ * doesn't carry is ignored, which is what lets one list span both surfaces'
+ * apps: the panel's Maps and the browser's NetGraph sit in the same list, each
+ * ignored where it doesn't exist. An app the list doesn't name keeps its
+ * `placement` order, after the named ones. */
+const appOrder = reactive<string[]>([])
+
+export function registerAppOrder(names: string[]): void {
+  appOrder.splice(0, appOrder.length, ...names.map((n) => n.toLowerCase()))
+}
+
+/** Position in the image's order, or Infinity for an app it doesn't name. */
+function orderRank(a: AppEntry): number {
+  if (!appOrder.length) return Infinity
+  const names = [a.id, a.label, a.icon].map((n) => n.toLowerCase())
+  const i = appOrder.findIndex((n) => names.includes(n))
+  return i < 0 ? Infinity : i
+}
+
 function placeRank(p: number): number {
   return p > 0 ? 0 : p < 0 ? 2 : 1
 }
 
-/** Dock order: positive placements first (ascending), then 0 (alphabetic by
- *  label), then negative (ascending). Mirrors the menu store's comparator. */
+/** Dock order: the image's app order first, in its order; then everything it
+ *  doesn't name — positive placements (ascending), then 0 (alphabetic by label),
+ *  then negative (ascending), which mirrors the menu store's comparator and is
+ *  the whole order on an image that states none. */
 export const sortedApps = computed<AppEntry[]>(() =>
   [...apps.values()].sort((a, b) => {
+    const oa = orderRank(a)
+    const ob = orderRank(b)
+    if (oa !== ob) return oa < ob ? -1 : 1
     const pa = a.placement ?? 0
     const pb = b.placement ?? 0
     const ra = placeRank(pa)
