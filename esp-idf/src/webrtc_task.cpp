@@ -158,6 +158,26 @@ PSRAM_BSS static uint8_t sctpBuf[SCTP_BUF_SIZE];
 /* Handshake dedup: last handshake packet length (avoid reprocessing retransmits) */
 static size_t lastHandshakeLen = 0;
 
+/* `webrtc.up` — the browser link as an ephemeral anything may gate on: 1 while
+ * DTLS and SCTP are both up, which is exactly the window a DataChannel can
+ * carry a byte in either direction.
+ *
+ * It exists because a flag the browser raises about ITSELF ("a monitor is
+ * open", "a viewer is reading") can only be lowered by a tab that is still
+ * there. One that crashed, slept, or lost its WiFi leaves the flag standing and
+ * whatever it gates running forever. A publisher that gates on its own flag AND
+ * on this one stops when the reader is really gone rather than when it says so.
+ *
+ * Published on change only, from the task loop, so every teardown path is
+ * covered by the two booleans rather than by remembering to clear it at each. */
+static void webrtcPublishLink() {
+    static int wasUp = -1;
+    int up = (sctp.established && dtlsConnected) ? 1 : 0;
+    if (up == wasUp) return;
+    wasUp = up;
+    storageSet("webrtc.up", up);
+}
+
 /* UDP activity */
 static uint32_t lastUdpRxMs = 0;
 static uint32_t lastUdpTxMs = 0;
@@ -1366,6 +1386,9 @@ static void webrtcTaskFn(void*) {
                 info("DTLS connected (timer retry)\n");
             }
         }
+
+        /* Last, so it reports what this pass left behind. */
+        webrtcPublishLink();
     }
 }
 

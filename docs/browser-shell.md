@@ -284,6 +284,44 @@ and write with `device.set("s.…", value)`. The store also auto-pushes the IANA
 timezone on first connect (if unset) and the client epoch time when the device
 clock is invalid, so the device gets time even without NTP.
 
+The device publishes the link itself as **`webrtc.up`** (1 while DTLS and SCTP
+are both up). It is there for the firmware side of a flag the browser raises
+about itself — "a monitor is open", "a viewer is reading" — because a tab that
+crashed, slept or lost its WiFi never gets to lower its own flag, and a
+publisher gated on that flag alone runs forever for a reader that is gone. A
+publisher gates on its own flag AND on `webrtc.up`; the falling edge arrives
+within seconds of the tab vanishing, and the rising edge starts it again on
+reconnect without the tab having to ask.
+
+Two things a reconnect needs from consumers, because a dump is a snapshot that
+arrives as a **merge**:
+
+- **`device.syncEpoch`** counts completed dumps (`{"__dump":"e"}`), the first
+  included. A consumer holding state *derived* from the mirror — a series it has
+  been accumulating, a timebase anchored on the device's uptime, a frozen span —
+  watches it to learn that what it holds came from a session it no longer has.
+  `synced` cannot say that: it goes true once and stays true through every later
+  reconnect.
+- **`device.snapshotTree(path)`** declares a subtree snapshot-authoritative: it
+  is dropped from the mirror as each dump begins, so the dump is what the mirror
+  holds under it. A merge re-states what exists and says nothing about what
+  doesn't, so nothing in a dump can retract a key the device deleted while the
+  link was down — nor correct one the device stopped writing. Declare **every
+  key a publisher writes only while a viewer is watching**, not only the ones
+  whose keys come and go:
+  - A series with keys that come and go (per-frame records, table slots) keeps
+    ghosts the device has long forgotten, which then draw for the life of the
+    tab.
+  - A *single* key, always overwritten, is no safer if its value belongs to one
+    session. The sharpest case: a value carrying the device's uptime. After a
+    device reset the mirror still holds the last boot's copy, the viewer reads
+    it before the first fresh one lands, and anything that takes a timebase from
+    it is anchored to a boot that has ended — every new record then arrives
+    "in the past" and nothing draws again until the page is reloaded.
+
+  Declare the narrowest roots that cover it, since each reads as absent for the
+  length of the dump.
+
 ### Log stream
 
 The `log` store (`stores/log`) pre-connects the `log:1` DataChannel at startup so

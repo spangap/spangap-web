@@ -112,7 +112,17 @@ server role, with mbedTLS cookie-based DoS protection on the handshake.
 
 ## Storage surface
 
-`webrtc` defines no settings of its own. It reads net-owned `s.net.webrtc_port`
+`webrtc` publishes one ephemeral, **`webrtc.up`** — `1` while DTLS and SCTP are
+both up, which is exactly the window a DataChannel can carry a byte. It is the
+link as a fact anything may gate on, and it exists for the flags a browser
+raises about *itself*: "a monitor is open", "a viewer is reading". Only a tab
+that is still there can lower such a flag, so a crash, a slept phone or a
+dropped WiFi leaves it standing and whatever it gates running for a reader that
+is gone. A publisher gates on its own flag AND on this one. Written on change
+from the task loop, so every teardown path is covered by the two booleans rather
+than by remembering to clear it at each.
+
+It defines no settings of its own. It reads net-owned `s.net.webrtc_port`
 (the UDP port — when it is `0` the UDP socket isn't opened and WebRTC is off),
 reads `s.wg.address` / `wg.up` to add the WireGuard host candidate to the SDP
 answer, and reacts to `wifi.{sta,ap}.up` to bring the socket and DTLS up/down. It

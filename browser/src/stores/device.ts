@@ -25,6 +25,13 @@ export const useDeviceStore = defineStore('device', () => {
    *  a fresh full storage dump lands — i.e. "reconnected AND resynced". Drives
    *  the full-screen ConnectionOverlay. */
   const linkDown = ref(false)
+  /** Bumped once per completed full dump ({__dump:'e'}), the first included.
+   *  A consumer holding state DERIVED from the mirror — a series it has been
+   *  accumulating, a timebase it anchored on the device's uptime, a span it
+   *  froze — watches this to know that what it holds came from a session it no
+   *  longer has, and starts again. `synced` cannot say that: it goes true once
+   *  and stays true through every later reconnect. */
+  const syncEpoch = ref(0)
 
   const session = getSession()
   let dc: RTCDataChannel | null = null
@@ -115,6 +122,41 @@ export const useDeviceStore = defineStore('device', () => {
 
       dst[key] = val
     }
+  }
+
+  /** Subtrees dropped from the mirror at the start of every full dump. */
+  const snapshotRoots = new Set<string>()
+
+  /** Declare the subtree at `path` snapshot-authoritative: the dump that
+   *  follows is what the mirror holds under it, rather than what the dump
+   *  leaves on top of what was already there.
+   *
+   *  A dump is a snapshot but it is APPLIED as a merge, and a merge cannot
+   *  retract: it re-states what exists and says nothing about what doesn't. For
+   *  config that is harmless — a key the device dropped is a key nothing reads.
+   *  For a live series whose keys come AND GO (per-frame monitor records,
+   *  neighbourhood slots) it is not: every record the device deleted while the
+   *  link was down stays in the mirror forever, a ghost the device has long
+   *  forgotten, and the deletes that would have retracted it were dropped with
+   *  the session that should have carried them. So the publisher of such a
+   *  series declares its root here, once, and the arriving dump refills it.
+   *
+   *  The window between the drop and the chunk that refills it is the length of
+   *  the dump, so declare the series and not the tree above it: the narrower the
+   *  root, the less reads as briefly absent. */
+  function snapshotTree(path: string) { snapshotRoots.add(path) }
+
+  /** Delete a subtree from the local mirror. Local only — the device is not
+   *  told, and is not meant to be: this says "I no longer have grounds to
+   *  believe this", not "drop it". */
+  function forgetPath(path: string) {
+    const parts = path.split('.')
+    let obj: any = settings
+    for (let i = 0; i < parts.length - 1; i++) {
+      obj = obj?.[parts[i]]
+      if (!obj || typeof obj !== 'object') return
+    }
+    delete obj[parts[parts.length - 1]]
   }
 
   /** The tab title follows the device: "<host> - Web UI", struck out while
@@ -307,8 +349,14 @@ export const useDeviceStore = defineStore('device', () => {
            local toggles (e.g. record.*) win over the just-merged stale state,
            replacing the old fixed 300ms timeout race. */
         if (json.__dump !== undefined) {
-          if (json.__dump === 'b') clientInfoPushed = false
-          else if (json.__dump === 'e') { synced.value = true; flushPendingSets(); pushClientInfo(); clearLinkDown() }
+          if (json.__dump === 'b') {
+            clientInfoPushed = false
+            for (const p of snapshotRoots) forgetPath(p)
+          } else if (json.__dump === 'e') {
+            synced.value = true
+            syncEpoch.value++
+            flushPendingSets(); pushClientInfo(); clearLinkDown()
+          }
           return
         }
         deepMerge(settings, json)
@@ -437,5 +485,6 @@ export const useDeviceStore = defineStore('device', () => {
     dc = null
   })
 
-  return { settings, connected, synced, linkDown, get, set, sendJson, sendCommand, save, connect }
+  return { settings, connected, synced, linkDown, syncEpoch, get, set, sendJson, sendCommand,
+           save, connect, snapshotTree }
 })
