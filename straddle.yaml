@@ -16,9 +16,10 @@ browser: browser
 platforms: [idf]
 requires:
   - spangap/spangap-net
-  # webrtc_task.cpp unconditionally #include's "upnp.h" for external-IP
-  # discovery; today that makes upnp a hard dep. Could become an
-  # additional_installs entry once the call site is gated on CONFIG_SPANGAP_UPNP.
+# The port mapper supplies the reflexive ICE candidate webrtc_task.cpp offers;
+# that call site is gated on CONFIG_SPANGAP_UPNP, so a build without it simply
+# offers host candidates only. Default-on, droppable.
+additional_installs:
   - spangap/upnp
 # Auto-init: comes up in the generated serviceRunInit() walk, so a
 # --no-web build (spangap-web not staged) simply emits no registration — no #if

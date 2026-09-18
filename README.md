@@ -6,6 +6,10 @@ carries every device↔browser data path, and the shared browser UI shell. It is
 also the **browser-side UI activator** — when this straddle is in the build, the
 build picks up every other straddle's `browser/` subdir and folds it into one SPA.
 
+On ESP-IDF's Linux host target the WebRTC half is left out — a browser reaches
+a simulated station over TCP — and `src/host/` keeps its boot hook and nothing
+else. See `reticulous/sim/`.
+
 This is a multi-function straddle. Each function has its own operator guide and
 maintainer reference under [`docs/`](docs/):
 

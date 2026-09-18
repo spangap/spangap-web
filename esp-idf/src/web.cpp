@@ -26,12 +26,14 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include "esp_heap_caps.h"
-#include "esp_memory_utils.h"   /* esp_ptr_external_ram / esp_ptr_in_dram — genBuf sanity */
 #include "mbedtls/sha1.h"
 #include "mbedtls/base64.h"
 #include "cJSON.h"
 #include "miniz.h"        /* ESP32-S3 ROM DEFLATE (tinfl_*) — zero added flash */
+#if !CONFIG_IDF_TARGET_LINUX
+#include "esp_memory_utils.h"   /* esp_ptr_external_ram / esp_ptr_in_dram — genBuf sanity */
 #include "lwip/ip_addr.h" /* ip_addr_isloopback — loopback request exemptions */
+#endif                    /* on the host both come from net.h and the C library */
 
 #include "safe_mode.h"   /* the recovery boot's page + its one gated endpoint */
 
@@ -591,11 +593,17 @@ static void freeGenBuf(web_handle_t& wh) {
     uint8_t* p = wh.genBuf;
     wh.genBuf = nullptr;
     if (!p) return;
+#if CONFIG_IDF_TARGET_LINUX
+    /* One address space and one allocator: there is no region a heap pointer
+     * could be outside of, and nothing to test it against. */
+    heap_caps_free(p);
+#else
     if (esp_ptr_external_ram(p) || esp_ptr_in_dram(p)) {
         heap_caps_free(p);
     } else {
         err("genBuf=%p outside heap — dropping (heap corruption upstream)\n", p);
     }
+#endif
 }
 
 static int webAllocSlot(int itsH) {
@@ -883,16 +891,27 @@ static bool sendAll(int h, const void* data, size_t len) {
     return true;
 }
 
+/** A file this can actually serve: not a directory. POSIX opens a directory
+ *  for reading quite happily and reports its inode size, so without this a
+ *  request for a mapping's root answers 200 with a length nothing can fill. */
+static FILE* openRegular(const char* path) {
+    FILE* fp = fopen(path, "rb");
+    if (!fp) return nullptr;
+    struct stat st;
+    if (fstat(fileno(fp), &st) == 0 && S_ISDIR(st.st_mode)) { fclose(fp); return nullptr; }
+    return fp;
+}
+
 /** Try fopen path.gz then path. Returns fp (or nullptr) and sets *gz. */
 static FILE* openWithGzFallback(const char* path, bool tryGz, bool* gz) {
     FILE* fp = nullptr;
     *gz = false;
     if (tryGz) {
         char g[200]; snprintf(g, sizeof(g), "%.190s.gz", path);
-        fp = fopen(g, "rb");
+        fp = openRegular(g);
         if (fp) { *gz = true; return fp; }
     }
-    return fopen(path, "rb");
+    return openRegular(path);
 }
 
 /* Single persistent worker serialises file responses — SD and network bandwidth
@@ -2118,11 +2137,11 @@ void webInit() {
 
     /* Base URL→filesystem mappings. webMapAddIfAbsent only adds if the URL
      * isn't already present — user customisations to s.web.map survive. */
-    webMapAddIfAbsent("/",      "/fixed/webroot", 0, 0, nullptr);
-    webMapAddIfAbsent("/state", "/state",         1, 1, "admin");
-    webMapAddIfAbsent("/fixed", "/fixed",         1, 1, "admin");
+    webMapAddIfAbsent("/",      FS_FIXED "/webroot", 0, 0, nullptr);
+    webMapAddIfAbsent("/state", FS_STATE,            1, 1, "admin");
+    webMapAddIfAbsent("/fixed", FS_FIXED,            1, 1, "admin");
 #if CONFIG_SPANGAP_SDCARD
-    webMapAddIfAbsent("/sdcard", "/sdcard",       1, 1, "admin");
+    webMapAddIfAbsent("/sdcard", FS_SDCARD,          1, 1, "admin");
 #endif
 
     cliRegisterCmd("web", cmdWeb);

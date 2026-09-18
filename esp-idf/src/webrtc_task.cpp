@@ -23,7 +23,9 @@
 #include "net.h"
 #include "web.h"
 #include "auth.h"
-#include "upnp.h"
+#if CONFIG_SPANGAP_UPNP
+#include "upnp.h"      /* the external address a port mapper learned, for srflx */
+#endif
 
 #include "esp_netif.h"
 #include <cstring>
@@ -698,6 +700,9 @@ static std::string generateSdpAnswer(const char* offerSdp) {
         sdp += line;
     }
 
+    /* Without a port mapper in the build nothing knows the external address,
+     * and the reflexive candidate is simply absent. */
+#if CONFIG_SPANGAP_UPNP
     const char* extIp = upnpExternalIp();
     if (extIp[0] && numIps > 0) {
         snprintf(line, sizeof(line),
@@ -705,6 +710,7 @@ static std::string generateSdpAnswer(const char* offerSdp) {
             numIps + 1, (unsigned)(2130706431 - numIps - 1), extIp, port, ips[0], port);
         sdp += line;
     }
+#endif
 
     return sdp;
 }
