@@ -27,15 +27,23 @@
 #include "upnp.h"      /* the external address a port mapper learned, for srflx */
 #endif
 
-#include "esp_netif.h"
+#include "webrtc_port.h"
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#if CONFIG_IDF_TARGET_LINUX
+/* The host build has no lwIP: the sockets are the machine's own, and so is
+ * the fcntl that lwIP's header would otherwise have brought in. */
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#else
 #include <lwip/sockets.h>
+#endif
 #include "esp_heap_caps.h"
 #include "esp_random.h"
-#include "esp_rom_crc.h"
 
 #include "mbedtls/ssl.h"
 #include "mbedtls/ssl_cookie.h"
@@ -529,7 +537,7 @@ static void handleStunRequest(const uint8_t* req, size_t reqLen,
     memcpy(resp + pos, hmac, 20); pos += 20;
 
     w16(resp + 2, (uint16_t)(pos - 20 + 8));
-    uint32_t fp = esp_rom_crc32_le(0, resp, pos) ^ 0x5354554E;
+    uint32_t fp = webrtcCrc32(resp, pos) ^ 0x5354554E;
     w16(resp + pos, 0x8028); pos += 2;
     w16(resp + pos, 4); pos += 2;
     w32(resp + pos, fp); pos += 4;
@@ -640,26 +648,7 @@ static std::string generateSdpAnswer(const char* offerSdp) {
     tlsCertFingerprint(fingerprint, sizeof(fingerprint));
 
     char ips[4][16] = {};
-    int numIps = 0;
-
-    { esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-      if (netif) {
-          esp_netif_ip_info_t info;
-          if (esp_netif_get_ip_info(netif, &info) == ESP_OK && info.ip.addr != 0) {
-              esp_ip4addr_ntoa(&info.ip, ips[numIps], sizeof(ips[0]));
-              numIps++;
-          }
-      }
-    }
-    { esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-      if (netif) {
-          esp_netif_ip_info_t info;
-          if (esp_netif_get_ip_info(netif, &info) == ESP_OK && info.ip.addr != 0) {
-              esp_ip4addr_ntoa(&info.ip, ips[numIps], sizeof(ips[0]));
-              numIps++;
-          }
-      }
-    }
+    int numIps = webrtcLocalIps(ips, 3);   /* one slot kept for wireguard below */
     { char wgAddr[16] = {};
       storageGetStr("s.wg.address", wgAddr, sizeof(wgAddr));
       if (wgAddr[0] && storageGetInt("wg.up", 0)) {
@@ -1152,7 +1141,7 @@ static void openUdpSocket() {
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(port);
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = webrtcBindAddrV4();
     if (bind(udpFd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         err("bind port %d: %d\n", port, errno);
         close(udpFd); udpFd = -1; return;

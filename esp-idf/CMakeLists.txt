@@ -1,14 +1,14 @@
 file(GLOB WEB_SRCS "src/*.cpp")
 
-# The WebRTC DataChannel is an lwIP UDP stack with its own SCTP on top; the
-# host build serves the browser over TCP and leaves it out, keeping only the
-# boot hook the generated dispatch calls.
+# The WebRTC DataChannel builds on both targets: ICE, DTLS, SCTP and the router
+# above them are the same source, so a browser talking to a simulated station
+# talks to it exactly as it talks to a board. Only `webrtc_port` differs — the
+# local addresses to advertise, the address the UDP socket binds, and a CRC32
+# the chip has in ROM.
 set(_WEB_IDF_REQ esp_event mbedtls json)
 if(IDF_TARGET STREQUAL "linux")
-    list(REMOVE_ITEM WEB_SRCS
-        "${CMAKE_CURRENT_LIST_DIR}/src/webrtc_task.cpp"
-        "${CMAKE_CURRENT_LIST_DIR}/src/webrtc_sctp.cpp")
-    list(APPEND WEB_SRCS "${CMAKE_CURRENT_LIST_DIR}/src/host/webrtc_stub.cpp")
+    list(REMOVE_ITEM WEB_SRCS "${CMAKE_CURRENT_LIST_DIR}/src/webrtc_port.cpp")
+    list(APPEND WEB_SRCS "${CMAKE_CURRENT_LIST_DIR}/src/host/webrtc_port.cpp")
 else()
     list(APPEND _WEB_IDF_REQ esp_netif lwip)
 endif()

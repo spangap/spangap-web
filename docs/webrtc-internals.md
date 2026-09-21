@@ -35,7 +35,10 @@ The signaling WS, the UDP socket, and DTLS are all torn down and rebuilt on
 
 Unlike `web` (which never touches a raw socket — `net` accepts every TCP/TLS
 connection and forwards it up over ITS), `webrtc` opens and binds its **own**
-non-blocking UDP socket (`openUdpSocket`: `socket`/`bind` on `INADDR_ANY:port`,
+non-blocking UDP socket (`openUdpSocket`: `socket`/`bind` on
+`webrtcBindAddrV4():port` — `INADDR_ANY` on a chip, the station's own address
+on the host, where the port would otherwise go to whichever station started
+first,
 `port` from `s.net.webrtc_port`, skipped when `port <= 0`). `net` does no UDP
 multiplexing, so only the signaling WS arrives over ITS; all media is on this
 socket. Traffic counters are still fed back to `net` (`netTrafficIn`/`Out`).

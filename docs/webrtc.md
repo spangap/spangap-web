@@ -127,7 +127,9 @@ It defines no settings of its own. It reads net-owned `s.net.webrtc_port`
 reads `s.wg.address` / `wg.up` to add the WireGuard host candidate to the SDP
 answer, and reacts to `wifi.{sta,ap}.up` to bring the socket and DTLS up/down. It
 registers the `/webrtc` WS path with [web](web.md) for signaling, but opens its
-own UDP socket directly (binding `s.net.webrtc_port` on `INADDR_ANY`) — `net` does
+own UDP socket directly (binding `s.net.webrtc_port`, on `INADDR_ANY` on a
+chip and on the station's own address on the Linux host target, where every
+station is a process sharing one network stack) — `net` does
 no UDP forwarding, so the media socket is `webrtc`'s alone.
 
 ## Failure mode
