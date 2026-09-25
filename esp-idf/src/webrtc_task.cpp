@@ -1154,6 +1154,19 @@ static void closeUdpSocket() {
     if (udpFd >= 0) { close(udpFd); udpFd = -1; }
 }
 
+/* A board that can wake a task when a descriptor is ready: select() that also
+ * returns when the task is notified, leaving the notification for its own
+ * take. Weak, and absent on a chip. */
+extern "C" int hwLinuxWait(int nfds, fd_set* rfds, fd_set* wfds, fd_set* efds,
+                           TickType_t ticks) __attribute__((weak));
+
+/* Nothing of this pass depends on the clock: no peer, no handshake, no
+ * association, no signalling session. What wakes the task then is a datagram
+ * on the socket or a message in its inbox. */
+static bool webrtcQuiet() {
+    return !peerKnown && !dtlsConnected && !sctp.established && itsHandle < 0;
+}
+
 /* ---- Main task ---- */
 
 static void webrtcTaskFn(void*) {
@@ -1226,9 +1239,19 @@ static void webrtcTaskFn(void*) {
     }
 
     for (;;) {
-        /* Unconditional yield per loop — under sustained load itsPoll(1)
-           can return immediately and starve IDLE0 past the watchdog. */
-        vTaskDelay(1);
+        /* With a board that wakes the task on its socket and its inbox, a
+           quiet task sleeps until one of them has something. */
+        bool asleep = hwLinuxWait && webrtcQuiet();
+        if (asleep) {
+            fd_set rd;
+            FD_ZERO(&rd);
+            if (udpFd >= 0) FD_SET(udpFd, &rd);
+            hwLinuxWait(udpFd + 1, &rd, nullptr, nullptr, portMAX_DELAY);
+        } else {
+            /* Unconditional yield per loop — under sustained load itsPoll(1)
+               can return immediately and starve IDLE0 past the watchdog. */
+            vTaskDelay(1);
+        }
 
         /* Drain inbox + per-connection recv callbacks. When UDP open, poll
            briefly so recvfrom also gets its turn; otherwise block until an
@@ -1236,7 +1259,7 @@ static void webrtcTaskFn(void*) {
            non-empty must not keep this pass from the yield above — the
            remainder is simply next pass's work. */
         for (int i = 0; i < 64; i++) {
-            if (!itsPoll(udpFd >= 0 ? 1 : portMAX_DELAY)) break;
+            if (!itsPoll(asleep ? 0 : udpFd >= 0 ? 1 : portMAX_DELAY)) break;
         }
 
         /* Drain UDP socket */

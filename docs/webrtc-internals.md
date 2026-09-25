@@ -30,6 +30,16 @@ per iteration** (under sustained load `itsPoll(1)` can return immediately and
 starve IDLE0 past the watchdog — keep the yield), then drain the ITS inbox, drain
 the UDP socket (`recvfrom` in a loop), run the send scheduler, then service the
 signaling WS. When the UDP socket is closed it blocks in `itsPoll(portMAX_DELAY)`.
+
+On a board that can wake a task on a descriptor — `hwLinuxWait()`, the Linux
+host board's, declared weak and absent on a chip — the loop sleeps instead of
+yielding for as long as it is **quiet**: no peer known, no DTLS session, no
+SCTP association and no signalling WS, so nothing it does depends on the
+clock. Then it blocks on its UDP socket and its inbox together, and the first
+datagram (a browser's STUN binding request) or inbox message ends the wait;
+from there it runs the loop above until the session is gone. A chip's loop is
+unchanged.
+
 The signaling WS, the UDP socket, and DTLS are all torn down and rebuilt on
 `wifi.{sta,ap}.up` transitions and on `s.net.webrtc_port` change.
 
@@ -127,7 +137,8 @@ the browser (otherwise the browser sees a raw 1006), then it is evicted.
   `CONFIG_SPANGAP_UPNP` would let upnp become an `additional_installs` entry
   instead; until then it's a build requirement.
 - **Keep the per-loop `vTaskDelay(1)`.** It is the IDLE0-watchdog safety valve,
-  not an optimisation.
+  not an optimisation. A quiet loop that blocks in `hwLinuxWait()` instead
+  yields just as surely.
 - **DTLS verify mode is `VERIFY_NONE`.** The browser authenticates the channel by
   the DTLS fingerprint carried in the (already auth-gated) SDP, not by a CA chain.
 - **All routed ITS ports are internal and packet-mode** — both endpoints are
