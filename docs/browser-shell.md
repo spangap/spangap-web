@@ -401,6 +401,14 @@ registry only mirrors z-order; on a phone it is load-bearing — the floating
 paradigm collapses to a single full-screen window, and `focusedWindowId` is the
 one painted.
 
+### Somebody at the tab (`lib/presence`)
+
+`lib/presence` says whether a person is at this tab, for work worth doing only
+while somebody is watching. `tabVisible` follows `document.visibilityState`.
+`useRecentInput(ms)` is a flag that is true while there has been real input (a
+pointer or key going down, a scroll, a touch) within the last `ms`; page load
+counts as input, and callers asking for the same `ms` share one flag.
+
 ### Compact mode (`lib/viewport`)
 
 `useCompact()` (`lib/viewport`) is the single source of truth for "phone-class
