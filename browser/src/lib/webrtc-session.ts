@@ -27,6 +27,9 @@ const WS_CLOSE_AUTH = 4401
 const WS_CLOSE_BUSY = 4409
 const WS_CLOSE_KICK = 4008
 
+const SIGNALING_OPEN_MS = 6000
+const PC_CONNECT_MS = 15000
+
 /** Hook called when a new PC comes up — consumers open their DC(s) here.
  *  Invoked each reconnect with a fresh PC. Implementations should be
  *  idempotent (no shared state across calls) and can close the DC in
@@ -38,6 +41,7 @@ class WebrtcSession {
   private _pc: RTCPeerConnection | null = null
   private ws: WebSocket | null = null
   private reconnect = new ReconnectTimer()
+  private attemptTimer: ReturnType<typeof setTimeout> | null = null
   private wantConnected = false
   private pendingForce = false
   private generation = 0
@@ -152,7 +156,24 @@ class WebrtcSession {
     }
   }
 
+  private armAttempt(gen: number, ms: number) {
+    this.clearAttempt()
+    this.attemptTimer = setTimeout(() => {
+      this.attemptTimer = null
+      if (gen !== this.generation || this._state === 'connected') return
+      console.log('[session] connect attempt timed out')
+      this.teardown()
+      this.setState('error')
+      this.scheduleReconnect()
+    }, ms)
+  }
+
+  private clearAttempt() {
+    if (this.attemptTimer) { clearTimeout(this.attemptTimer); this.attemptTimer = null }
+  }
+
   private teardown() {
+    this.clearAttempt()
     this.generation++
     if (this._pc) {
       try { this._pc.close() } catch { /* ignore */ }
@@ -190,10 +211,12 @@ class WebrtcSession {
       this.scheduleReconnect()
       return
     }
+    this.armAttempt(gen, SIGNALING_OPEN_MS)
 
     this.ws.onopen = () => {
       if (gen !== this.generation) return
       this.reconnect.clear()
+      this.armAttempt(gen, PC_CONNECT_MS)
       void this.startWebRTC(gen)
     }
 
@@ -243,7 +266,7 @@ class WebrtcSession {
       if (gen !== this.generation) return
       const st = pc.connectionState
       console.log('[session] pc state:', st)
-      if (st === 'connected') this.setState('connected')
+      if (st === 'connected') { this.clearAttempt(); this.setState('connected') }
       else if (st === 'failed') {
         this.teardown()
         this.setState('error')
