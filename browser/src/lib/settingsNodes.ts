@@ -141,6 +141,10 @@ export interface GenRow {
   // A key holding the placeholder text, for a hint only the device knows (the
   // MAC it would use, the port it would pick). Wins over `placeholder`.
   placeholderKey?: string
+  // A form text field that ends at a character: what follows `splitAt` goes to
+  // the sibling field `splitTo`, and the caret with it ("host:port").
+  splitAt?: string
+  splitTo?: string
   options?: GenOption[]
   searchable?: boolean // type-to-filter picker, for lists too long to scan
   copyable?: boolean // value rows: click-to-copy

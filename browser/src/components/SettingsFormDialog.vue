@@ -76,6 +76,7 @@
                   @click="edit(row, String(stepped(row, -1)))"
                 />
                 <q-input
+                  :ref="inputRef(row.field)"
                   class="num-field"
                   :model-value="String(model[row.field!] ?? '')"
                   dense outlined
@@ -134,6 +135,7 @@
 
               <q-input
                 v-else
+                :ref="inputRef(row.field)"
                 :model-value="String(model[row.field!] ?? '')"
                 :type="row.secret ? 'password' : 'text'"
                 :placeholder="placeholderOf(row)"
@@ -141,7 +143,7 @@
                 :autocomplete="row.secret ? 'new-password' : 'off'"
                 autocorrect="off" autocapitalize="off" spellcheck="false"
                 v-bind="NO_MANAGER"
-                @update:model-value="(v) => edit(row, String(v ?? ''))"
+                @update:model-value="(v) => editText(row, String(v ?? ''))"
               />
             </SettingRow>
           </template>
@@ -160,7 +162,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, reactive, ref, watch } from 'vue'
 import { useDeviceStore } from '../stores/device'
 import { subst, truthy, rowVisible, buttonStyle, NAME_COL, NO_MANAGER, numberChars, quadChars } from '../lib/settingsRuntime'
 import type { GenForm, GenRow, GenOption } from '../lib/settingsNodes'
@@ -271,6 +273,30 @@ function edit(row: GenRow, value: unknown) {
   model[row.field] = value
   dirty[row.field] = true
   applyDefaults()
+}
+
+/* -- split fields --
+ * A text field that ends at a character ("host" before ':') hands what follows
+ * it to a sibling field and the caret with it — typed or pasted alike. The raw
+ * text is shown for one tick first: the field already displays it, and setting
+ * the model straight back to what it held would be no change for the input to
+ * redraw, leaving the character on screen. */
+const inputs: Record<string, { focus: () => void } | null> = {}
+function inputRef(field: string | undefined) {
+  return (el: unknown) => { if (field) inputs[field] = el as { focus: () => void } | null }
+}
+
+function editText(row: GenRow, value: string) {
+  const at = row.splitAt
+  const i = at ? value.indexOf(at) : -1
+  const to = i >= 0 ? fieldsFlat.find(r => r.field === row.splitTo) : undefined
+  if (!at || !to) { edit(row, value); return }
+  model[row.field!] = value
+  void nextTick(() => {
+    edit(row, value.slice(0, i))
+    edit(to, value.slice(i + at.length))
+    inputs[to.field!]?.focus()
+  })
 }
 
 function visible(row: GenRow): boolean {
