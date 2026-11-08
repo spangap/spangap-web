@@ -393,12 +393,16 @@ watch(() => device.get(ackKey.value), () => {
   if (submitted.value) close()
 })
 
+/* A field its gate hides is not in force and goes out empty, whatever the model
+ * holds — a default it was given, or what was typed before the gate closed.
+ * Empty is an erase to the owning task, so clearing the field that opens the
+ * gate clears the ones behind it too (no IP: no netmask either). */
 function submit() {
   const payload: Record<string, string> = {}
   for (const row of fieldsFlat) {
     if (!row.field) continue
     const v = model[row.field]
-    payload[row.field] = v === undefined || v === null ? '' : String(v)
+    payload[row.field] = !visible(row) || v === undefined || v === null ? '' : String(v)
   }
   if (props.editId) payload._id = props.editId
   error.value = ''
